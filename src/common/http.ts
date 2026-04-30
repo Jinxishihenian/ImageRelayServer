@@ -76,6 +76,17 @@ export function parseOptionalBoolean(value: unknown, fieldName: string): boolean
   });
 }
 
+export function parseOptionalString(value: unknown, fieldName: string): string | undefined {
+  const normalizedValue = parseSingleQueryValue(value, fieldName);
+
+  if (normalizedValue === undefined) {
+    return undefined;
+  }
+
+  const trimmedValue = normalizedValue.trim();
+  return trimmedValue === "" ? undefined : trimmedValue;
+}
+
 export type PaginationQuery = {
   page: number;
   pageSize: number;

@@ -65,6 +65,10 @@ type TaskListScope = {
   role: UserRole;
 };
 
+type TaskListFilters = {
+  keyword?: string;
+};
+
 export type TaskListSummary = {
   total: number;
   actionableCount: number;
@@ -185,6 +189,29 @@ function getTaskScopeFilter(scope: TaskListScope): {
   };
 }
 
+function buildTaskListFilter(scope: TaskListScope, filters?: TaskListFilters): {
+  whereClause: string;
+  params: Array<number | string>;
+} {
+  const conditions: string[] = [];
+  const params: Array<number | string> = [];
+
+  if (scope.role !== "admin") {
+    conditions.push("(t.cleaner_id = ? OR t.annotator_id = ? OR t.trainer_id = ?)");
+    params.push(scope.id, scope.id, scope.id);
+  }
+
+  if (filters?.keyword) {
+    conditions.push("t.title LIKE ?");
+    params.push(`%${filters.keyword}%`);
+  }
+
+  return {
+    whereClause: conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "",
+    params,
+  };
+}
+
 function getActionableSummarySql(scope: TaskListScope): {
   sql: string;
   params: number[];
@@ -233,9 +260,12 @@ export async function listTasksForUser(
   input: {
     page: number;
     pageSize: number;
+    keyword?: string;
   },
 ): Promise<PaginatedTasksResult> {
-  const scopeFilter = getTaskScopeFilter(scope);
+  const listFilter = buildTaskListFilter(scope, {
+    keyword: input.keyword,
+  });
   const actionableSummary = getActionableSummarySql(scope);
   const summaryRows = await query<TaskSummaryRow[]>(
     `
@@ -244,9 +274,9 @@ export async function listTasksForUser(
         ${actionableSummary.sql},
         SUM(CASE WHEN t.status = 'finished' THEN 1 ELSE 0 END) AS finished_count
       FROM tasks t
-      ${scopeFilter.whereClause}
+      ${listFilter.whereClause}
     `,
-    [...scopeFilter.params, ...actionableSummary.params],
+    [...actionableSummary.params, ...listFilter.params],
   );
   const summaryRow = summaryRows[0];
   const summary: TaskListSummary = {
@@ -260,14 +290,14 @@ export async function listTasksForUser(
   const rows = await query<TaskQueryRow[]>(
     `
       ${getBaseTaskSelectSql()}
-      ${scopeFilter.whereClause}
+      ${listFilter.whereClause}
       ORDER BY
         FIELD(t.status, 'pending_clean', 'pending_annotate', 'pending_train', 'finished'),
         t.created_at DESC,
         t.id DESC
       LIMIT ? OFFSET ?
     `,
-    [...scopeFilter.params, input.pageSize, offset],
+    [...listFilter.params, input.pageSize, offset],
   );
 
   return {

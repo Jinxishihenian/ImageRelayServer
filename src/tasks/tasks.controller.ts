@@ -13,6 +13,7 @@ import {
 import {
   buildPaginationMeta,
   parsePaginationQuery,
+  parseOptionalString,
   parsePositiveInteger,
 } from "../common/http.js";
 import {
@@ -378,7 +379,11 @@ async function getPreviewableTaskFile(
 export const listTasksHandler: RequestHandler = async (req, res) => {
   const authUser = getAuthUser(req);
   const pagination = parsePaginationQuery(req.query);
-  const taskPage = await listTasksForUser(authUser, pagination);
+  const keyword = parseOptionalString(req.query.keyword, "keyword");
+  const taskPage = await listTasksForUser(authUser, {
+    ...pagination,
+    keyword,
+  });
 
   res.json({
     items: taskPage.items.map((task) => mapTaskSummary(task, authUser)),
