@@ -1,7 +1,12 @@
 import type { RequestHandler } from "express";
 
 import { USER_ROLES, type UserRole } from "../types/domain.js";
-import { parsePositiveInteger } from "../common/http.js";
+import {
+  buildPaginationMeta,
+  parseOptionalBoolean,
+  parsePaginationQuery,
+  parsePositiveInteger,
+} from "../common/http.js";
 import { getAuthUser } from "../auth/auth.middleware.js";
 import { AppError } from "../utils/app-error.js";
 import {
@@ -9,14 +14,37 @@ import {
   deleteUserById,
   findUserById,
   findUserByUsername,
+  getUserListSummary,
   listAllUsers,
+  listUsersPage,
   updateUser,
   userHasTaskReferences,
 } from "./users.repository.js";
 
-export const listUsersHandler: RequestHandler = async (_req, res) => {
-  const users = await listAllUsers();
-  res.json({ items: users });
+export const listUsersHandler: RequestHandler = async (req, res) => {
+  const all = parseOptionalBoolean(req.query.all, "all");
+
+  if (all) {
+    // 创建任务抽屉仍然需要完整用户列表，避免默认分页把负责人下拉截断。
+    const [users, summary] = await Promise.all([listAllUsers(), getUserListSummary()]);
+    const pageSize = users.length === 0 ? 10 : users.length;
+
+    res.json({
+      items: users,
+      pagination: buildPaginationMeta(1, pageSize, summary.total),
+      summary,
+    });
+    return;
+  }
+
+  const pagination = parsePaginationQuery(req.query);
+  const userPage = await listUsersPage(pagination);
+
+  res.json({
+    items: userPage.items,
+    pagination: buildPaginationMeta(userPage.page, userPage.pageSize, userPage.total),
+    summary: userPage.summary,
+  });
 };
 
 function parseRole(value: unknown): UserRole {

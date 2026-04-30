@@ -1,6 +1,10 @@
 import type { RequestHandler } from "express";
 
-import { parsePositiveInteger } from "../common/http.js";
+import {
+  buildPaginationMeta,
+  parsePaginationQuery,
+  parsePositiveInteger,
+} from "../common/http.js";
 import {
   FILE_LABELS,
   ROLE_LABELS,
@@ -267,10 +271,13 @@ function assertArchiveFileName(fileName: string, message: string, code: string):
 
 export const listTasksHandler: RequestHandler = async (req, res) => {
   const authUser = getAuthUser(req);
-  const tasks = await listTasksForUser(authUser);
+  const pagination = parsePaginationQuery(req.query);
+  const taskPage = await listTasksForUser(authUser, pagination);
 
   res.json({
-    items: tasks.map((task) => mapTaskSummary(task, authUser)),
+    items: taskPage.items.map((task) => mapTaskSummary(task, authUser)),
+    pagination: buildPaginationMeta(taskPage.page, taskPage.pageSize, taskPage.total),
+    summary: taskPage.summary,
   });
 };
 
@@ -356,6 +363,24 @@ export const createTaskHandler: RequestHandler = async (req, res) => {
   res.status(201).json({
     item: createdTask ? mapTaskDetail(createdTask, authUser) : null,
   });
+};
+
+export const deleteTaskHandler: RequestHandler = async (req, res) => {
+  const taskId = parsePositiveInteger(getSingleRouteParam(req.params.taskId, "taskId"), "taskId");
+  const task = await findTaskById(taskId);
+
+  if (!task) {
+    throw new AppError("任务不存在。", {
+      statusCode: 404,
+      code: "TASK_NOT_FOUND",
+    });
+  }
+
+  // 当前需求仅删除数据库中的任务记录，不同步清理任务目录下的历史文件。
+  // 这样可以避免误删产物；若后续需要回收文件，再补充显式清理策略。
+  await deleteTaskById(taskId);
+
+  res.status(204).send();
 };
 
 export const completeTaskStageHandler: RequestHandler = async (req, res) => {

@@ -8,6 +8,7 @@ import { uploadFileHandler } from "../files/file.controller.js";
 import {
   completeTaskStageHandler,
   createTaskHandler,
+  deleteTaskHandler,
   downloadTaskFileHandler,
   getTaskDetailHandler,
   listTasksHandler,
@@ -32,6 +33,7 @@ export function createApiRouter(env: AppEnv) {
   apiRouter.get("/tasks", authRequired, listTasksHandler);
   apiRouter.get("/tasks/:taskId", authRequired, getTaskDetailHandler);
   apiRouter.post("/tasks", authRequired, requireRoles("admin"), createTaskHandler);
+  apiRouter.delete("/tasks/:taskId", authRequired, requireRoles("admin"), deleteTaskHandler);
   apiRouter.post("/tasks/:taskId/complete-stage", authRequired, completeTaskStageHandler);
   apiRouter.get("/tasks/:taskId/files/:fileAlias/download", authRequired, downloadTaskFileHandler);
   apiRouter.post(

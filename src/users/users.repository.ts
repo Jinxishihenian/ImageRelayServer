@@ -25,6 +25,26 @@ async function findUserRowsBySql(sql: string, params: any[] = []): Promise<UserR
   return query<UserRow[]>(sql, params);
 }
 
+export type UserListSummary = {
+  total: number;
+  adminCount: number;
+  workerCount: number;
+};
+
+type UserSummaryRow = RowDataPacket & {
+  total: number;
+  admin_count: number;
+  worker_count: number;
+};
+
+export type PaginatedUsersResult = {
+  items: UserSummary[];
+  page: number;
+  pageSize: number;
+  total: number;
+  summary: UserListSummary;
+};
+
 export async function findUserByUsername(username: string): Promise<(UserSummary & { password: string }) | null> {
   const rows = await findUserRowsBySql(
     `
@@ -92,13 +112,59 @@ export async function findUsersByIds(ids: number[]): Promise<UserSummary[]> {
 export async function listAllUsers(): Promise<UserSummary[]> {
   const rows = await findUserRowsBySql(
     `
-      SELECT id, username, password, role, created_at
+      SELECT id, username, role, created_at
       FROM users
       ORDER BY FIELD(role, 'admin', 'cleaner', 'annotator', 'trainer'), id
     `,
   );
 
   return rows.map(mapUserRow);
+}
+
+export async function getUserListSummary(): Promise<UserListSummary> {
+  const rows = await query<UserSummaryRow[]>(
+    `
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END) AS admin_count,
+        SUM(CASE WHEN role <> 'admin' THEN 1 ELSE 0 END) AS worker_count
+      FROM users
+    `,
+  );
+  const row = rows[0];
+
+  return {
+    total: Number(row?.total ?? 0),
+    adminCount: Number(row?.admin_count ?? 0),
+    workerCount: Number(row?.worker_count ?? 0),
+  };
+}
+
+export async function listUsersPage(input: {
+  page: number;
+  pageSize: number;
+}): Promise<PaginatedUsersResult> {
+  const summary = await getUserListSummary();
+  const totalPages = summary.total === 0 ? 0 : Math.ceil(summary.total / input.pageSize);
+  const page = totalPages > 0 ? Math.min(input.page, totalPages) : input.page;
+  const offset = (page - 1) * input.pageSize;
+  const rows = await findUserRowsBySql(
+    `
+      SELECT id, username, role, created_at
+      FROM users
+      ORDER BY FIELD(role, 'admin', 'cleaner', 'annotator', 'trainer'), id
+      LIMIT ? OFFSET ?
+    `,
+    [input.pageSize, offset],
+  );
+
+  return {
+    items: rows.map(mapUserRow),
+    page,
+    pageSize: input.pageSize,
+    total: summary.total,
+    summary,
+  };
 }
 
 export async function createUser(input: {

@@ -65,6 +65,20 @@ type TaskListScope = {
   role: UserRole;
 };
 
+export type TaskListSummary = {
+  total: number;
+  actionableCount: number;
+  finishedCount: number;
+};
+
+export type PaginatedTasksResult = {
+  items: TaskRow[];
+  page: number;
+  pageSize: number;
+  total: number;
+  summary: TaskListSummary;
+};
+
 type CreateTaskInput = {
   title: string;
   description: string;
@@ -152,30 +166,117 @@ function getBaseTaskSelectSql(): string {
   `;
 }
 
-export async function listTasksForUser(scope: TaskListScope): Promise<TaskRow[]> {
-  const params: Array<number> = [];
-  let whereClause = "";
-
-  if (scope.role !== "admin") {
-    whereClause = `
-      WHERE t.cleaner_id = ? OR t.annotator_id = ? OR t.trainer_id = ?
-    `;
-    params.push(scope.id, scope.id, scope.id);
+function getTaskScopeFilter(scope: TaskListScope): {
+  whereClause: string;
+  params: number[];
+} {
+  if (scope.role === "admin") {
+    return {
+      whereClause: "",
+      params: [],
+    };
   }
 
+  return {
+    whereClause: `
+      WHERE t.cleaner_id = ? OR t.annotator_id = ? OR t.trainer_id = ?
+    `,
+    params: [scope.id, scope.id, scope.id],
+  };
+}
+
+function getActionableSummarySql(scope: TaskListScope): {
+  sql: string;
+  params: number[];
+} {
+  switch (scope.role) {
+    case "admin":
+      return {
+        sql: "0 AS actionable_count",
+        params: [],
+      };
+    case "cleaner":
+      return {
+        sql: `
+          SUM(CASE WHEN t.status = 'pending_clean' AND t.cleaner_id = ? THEN 1 ELSE 0 END)
+          AS actionable_count
+        `,
+        params: [scope.id],
+      };
+    case "annotator":
+      return {
+        sql: `
+          SUM(CASE WHEN t.status = 'pending_annotate' AND t.annotator_id = ? THEN 1 ELSE 0 END)
+          AS actionable_count
+        `,
+        params: [scope.id],
+      };
+    case "trainer":
+      return {
+        sql: `
+          SUM(CASE WHEN t.status = 'pending_train' AND t.trainer_id = ? THEN 1 ELSE 0 END)
+          AS actionable_count
+        `,
+        params: [scope.id],
+      };
+  }
+}
+
+type TaskSummaryRow = RowDataPacket & {
+  total: number;
+  actionable_count: number | null;
+  finished_count: number | null;
+};
+
+export async function listTasksForUser(
+  scope: TaskListScope,
+  input: {
+    page: number;
+    pageSize: number;
+  },
+): Promise<PaginatedTasksResult> {
+  const scopeFilter = getTaskScopeFilter(scope);
+  const actionableSummary = getActionableSummarySql(scope);
+  const summaryRows = await query<TaskSummaryRow[]>(
+    `
+      SELECT
+        COUNT(*) AS total,
+        ${actionableSummary.sql},
+        SUM(CASE WHEN t.status = 'finished' THEN 1 ELSE 0 END) AS finished_count
+      FROM tasks t
+      ${scopeFilter.whereClause}
+    `,
+    [...scopeFilter.params, ...actionableSummary.params],
+  );
+  const summaryRow = summaryRows[0];
+  const summary: TaskListSummary = {
+    total: Number(summaryRow?.total ?? 0),
+    actionableCount: Number(summaryRow?.actionable_count ?? 0),
+    finishedCount: Number(summaryRow?.finished_count ?? 0),
+  };
+  const totalPages = summary.total === 0 ? 0 : Math.ceil(summary.total / input.pageSize);
+  const page = totalPages > 0 ? Math.min(input.page, totalPages) : input.page;
+  const offset = (page - 1) * input.pageSize;
   const rows = await query<TaskQueryRow[]>(
     `
       ${getBaseTaskSelectSql()}
-      ${whereClause}
+      ${scopeFilter.whereClause}
       ORDER BY
         FIELD(t.status, 'pending_clean', 'pending_annotate', 'pending_train', 'finished'),
         t.created_at DESC,
         t.id DESC
+      LIMIT ? OFFSET ?
     `,
-    params,
+    [...scopeFilter.params, input.pageSize, offset],
   );
 
-  return rows.map(mapTaskRow);
+  return {
+    items: rows.map(mapTaskRow),
+    page,
+    pageSize: input.pageSize,
+    total: summary.total,
+    summary,
+  };
 }
 
 export async function findTaskById(taskId: number): Promise<TaskRow | null> {
