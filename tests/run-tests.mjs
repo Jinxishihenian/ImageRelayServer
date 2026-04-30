@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import request from "supertest";
 
 import { createApp } from "../dist/app/create-app.js";
+import { getAllowedFileAliases } from "../dist/common/role-status.js";
 import { loadEnv } from "../dist/config/env.js";
 
 const baseEnv = {
@@ -28,6 +29,8 @@ const app = createApp(baseEnv, {
 });
 
 async function run() {
+  assert.deepEqual(getAllowedFileAliases("trainer"), ["source", "cleaned", "annotated"]);
+
   const healthResponse = await request(app).get("/health");
   assert.equal(healthResponse.status, 200);
   assert.equal(healthResponse.body.status, "ok");

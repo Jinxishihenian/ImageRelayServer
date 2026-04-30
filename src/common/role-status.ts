@@ -56,6 +56,8 @@ export function getAllowedFileAliases(role: UserRole): TaskFileAlias[] {
     case "annotator":
       return ["cleaned"];
     case "trainer":
-      return ["source", "annotated"];
+      // 训练阶段需要同时消费原始数据、清洗产物和标注产物，
+      // 这里补上 cleaned，避免详情页不返回下载项且下载接口被角色白名单拦截。
+      return ["source", "cleaned", "annotated"];
   }
 }
