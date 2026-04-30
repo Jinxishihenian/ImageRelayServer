@@ -1,5 +1,6 @@
 import type { RequestHandler } from "express";
 
+import { parseUploadPurpose, validateUploadContent } from "./archive-utils.js";
 import { saveTempUpload } from "./file-storage.js";
 import { AppError } from "../utils/app-error.js";
 
@@ -25,6 +26,9 @@ export const uploadFileHandler: RequestHandler = async (req, res) => {
       code: "EMPTY_FILE_BODY",
     });
   }
+
+  const uploadPurpose = parseUploadPurpose(req.headers["x-upload-purpose"]);
+  await validateUploadContent(req.body, originalName, uploadPurpose);
 
   const file = await saveTempUpload(req.body, originalName, req.headers["content-type"] || "application/octet-stream");
 

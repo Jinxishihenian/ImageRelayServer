@@ -12,6 +12,8 @@ import {
   downloadTaskFileHandler,
   getTaskDetailHandler,
   listTasksHandler,
+  listTaskFilePreviewHandler,
+  previewTaskFileImageHandler,
 } from "../tasks/tasks.controller.js";
 import {
   createUserHandler,
@@ -36,6 +38,12 @@ export function createApiRouter(env: AppEnv) {
   apiRouter.delete("/tasks/:taskId", authRequired, requireRoles("admin"), deleteTaskHandler);
   apiRouter.post("/tasks/:taskId/complete-stage", authRequired, completeTaskStageHandler);
   apiRouter.get("/tasks/:taskId/files/:fileAlias/download", authRequired, downloadTaskFileHandler);
+  apiRouter.get("/tasks/:taskId/files/:fileAlias/preview", authRequired, listTaskFilePreviewHandler);
+  apiRouter.get(
+    "/tasks/:taskId/files/:fileAlias/preview/:entryId",
+    authRequired,
+    previewTaskFileImageHandler,
+  );
   apiRouter.post(
     "/files/upload",
     authRequired,

@@ -1,5 +1,14 @@
+import { pipeline } from "node:stream/promises";
+
 import type { RequestHandler } from "express";
 
+import {
+  canPreviewTaskArchive,
+  getFileExtension,
+  isArchiveFileName,
+  listZipPreviewItems,
+  openZipPreviewStream,
+} from "../files/archive-utils.js";
 import {
   buildPaginationMeta,
   parsePaginationQuery,
@@ -32,8 +41,6 @@ import {
   listTasksForUser,
   type TaskRow,
 } from "./tasks.repository.js";
-
-const ARCHIVE_EXTENSIONS = [".zip", ".rar", ".7z"];
 
 function getSingleRouteParam(value: string | string[] | undefined, fieldName: string): string {
   if (typeof value === "string") {
@@ -87,6 +94,10 @@ function getDownloadFields(task: TaskRow, user: AuthenticatedUser) {
         label: FILE_LABELS[alias],
         fileName: file.originalName,
         endpoint: `/api/v1/tasks/${task.id}/files/${alias}/download`,
+        canPreview: canPreviewTaskArchive(alias, file.originalName),
+        previewEndpoint: canPreviewTaskArchive(alias, file.originalName)
+          ? `/api/v1/tasks/${task.id}/files/${alias}/preview`
+          : null,
       };
     })
     .filter(Boolean);
@@ -244,20 +255,6 @@ function parseUploadedFile(input: unknown): UploadedFileRef {
   };
 }
 
-function getFileExtension(fileName: string): string {
-  const lastDotIndex = fileName.lastIndexOf(".");
-
-  if (lastDotIndex < 0) {
-    return "";
-  }
-
-  return fileName.slice(lastDotIndex).toLowerCase();
-}
-
-function isArchiveFileName(fileName: string): boolean {
-  return ARCHIVE_EXTENSIONS.includes(getFileExtension(fileName));
-}
-
 function assertArchiveFileName(fileName: string, message: string, code: string): void {
   if (isArchiveFileName(fileName)) {
     return;
@@ -267,6 +264,63 @@ function assertArchiveFileName(fileName: string, message: string, code: string):
     statusCode: 400,
     code,
   });
+}
+
+function assertPreviewableTaskAlias(alias: TaskFileAlias): void {
+  if (alias === "source" || alias === "cleaned") {
+    return;
+  }
+
+  throw new AppError("当前文件类型暂不支持预览。", {
+    statusCode: 400,
+    code: "UNSUPPORTED_PREVIEW_ALIAS",
+  });
+}
+
+async function getPreviewableTaskFile(
+  task: TaskRow,
+  user: AuthenticatedUser,
+  alias: TaskFileAlias,
+): Promise<{
+  absolutePath: string;
+  originalName: string;
+}> {
+  if (!canAccessTask(task, user)) {
+    throw new AppError("当前用户无权预览该文件。", {
+      statusCode: 403,
+      code: "FORBIDDEN_FILE_ACCESS",
+    });
+  }
+
+  if (user.role !== "admin" && !getAllowedFileAliases(user.role).includes(alias)) {
+    throw new AppError("当前角色无权预览该文件。", {
+      statusCode: 403,
+      code: "FORBIDDEN_FILE_ACCESS",
+    });
+  }
+
+  assertPreviewableTaskAlias(alias);
+
+  const fileInfo = getTaskFileInfo(task, alias);
+
+  if (!fileInfo.storageKey || !fileInfo.originalName) {
+    throw new AppError("任务文件不存在。", {
+      statusCode: 404,
+      code: "TASK_FILE_NOT_FOUND",
+    });
+  }
+
+  if (getFileExtension(fileInfo.originalName) !== ".zip") {
+    throw new AppError("当前压缩包格式暂不支持预览，当前仅支持 zip 预览。", {
+      statusCode: 400,
+      code: "UNSUPPORTED_PREVIEW_ARCHIVE_TYPE",
+    });
+  }
+
+  return {
+    absolutePath: await ensureStoredFileExists(fileInfo.storageKey),
+    originalName: fileInfo.originalName,
+  };
 }
 
 export const listTasksHandler: RequestHandler = async (req, res) => {
@@ -523,4 +577,66 @@ export const downloadTaskFileHandler: RequestHandler = async (req, res) => {
   const absolutePath = await ensureStoredFileExists(fileInfo.storageKey);
 
   res.download(absolutePath, fileInfo.originalName);
+};
+
+export const listTaskFilePreviewHandler: RequestHandler = async (req, res) => {
+  const authUser = getAuthUser(req);
+  const taskId = parsePositiveInteger(getSingleRouteParam(req.params.taskId, "taskId"), "taskId");
+  const alias = getSingleRouteParam(req.params.fileAlias, "fileAlias") as TaskFileAlias;
+  const task = await findTaskById(taskId);
+
+  if (!task) {
+    throw new AppError("任务不存在。", {
+      statusCode: 404,
+      code: "TASK_NOT_FOUND",
+    });
+  }
+
+  const { absolutePath } = await getPreviewableTaskFile(task, authUser, alias);
+  const pagination = parsePaginationQuery(req.query, {
+    page: 1,
+    pageSize: 24,
+  });
+  const pageSize = Math.min(Math.max(pagination.pageSize, 1), 60);
+  const items = await listZipPreviewItems(absolutePath, FILE_LABELS[alias]);
+  const totalPages = items.length === 0 ? 0 : Math.ceil(items.length / pageSize);
+  const page = totalPages > 0 ? Math.min(pagination.page, totalPages) : pagination.page;
+  const startIndex = (page - 1) * pageSize;
+  const pagedItems = items.slice(startIndex, startIndex + pageSize).map((item) => ({
+    ...item,
+    endpoint: `/api/v1/tasks/${task.id}/files/${alias}/preview/${item.id}`,
+  }));
+
+  res.json({
+    items: pagedItems,
+    pagination: buildPaginationMeta(page, pageSize, items.length),
+  });
+};
+
+export const previewTaskFileImageHandler: RequestHandler = async (req, res) => {
+  const authUser = getAuthUser(req);
+  const taskId = parsePositiveInteger(getSingleRouteParam(req.params.taskId, "taskId"), "taskId");
+  const alias = getSingleRouteParam(req.params.fileAlias, "fileAlias") as TaskFileAlias;
+  const entryId = getSingleRouteParam(req.params.entryId, "entryId");
+  const task = await findTaskById(taskId);
+
+  if (!task) {
+    throw new AppError("任务不存在。", {
+      statusCode: 404,
+      code: "TASK_NOT_FOUND",
+    });
+  }
+
+  const { absolutePath } = await getPreviewableTaskFile(task, authUser, alias);
+  const previewFile = await openZipPreviewStream(absolutePath, entryId, FILE_LABELS[alias]);
+
+  res.setHeader("Content-Type", previewFile.mimeType);
+  res.setHeader(
+    "Content-Disposition",
+    `inline; filename*=UTF-8''${encodeURIComponent(previewFile.fileName)}`,
+  );
+  res.setHeader("Cache-Control", "private, no-store");
+
+  // 预览图片按条目流式输出，避免一次性把整张图读入内存。
+  await pipeline(previewFile.stream, res);
 };
