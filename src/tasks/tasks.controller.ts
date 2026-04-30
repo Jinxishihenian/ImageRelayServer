@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { pipeline } from "node:stream/promises";
 
 import type { RequestHandler } from "express";
@@ -41,6 +42,34 @@ import {
   listTasksForUser,
   type TaskRow,
 } from "./tasks.repository.js";
+
+const DOWNLOAD_LINK_ROUTE = "/api/v1/public/task-files/download";
+
+function createDownloadLinkSignature(
+  taskId: number,
+  alias: TaskFileAlias,
+  expiresAt: number,
+  secret: string,
+): string {
+  return crypto
+    .createHmac("sha256", secret)
+    .update(`${taskId}:${alias}:${expiresAt}`)
+    .digest("base64url");
+}
+
+function buildAbsoluteUrl(req: Parameters<RequestHandler>[0], path: string): string {
+  const baseUrl = req.app.get("fileBaseUrl") as string | undefined;
+
+  if (baseUrl?.trim()) {
+    return new URL(path, `${baseUrl.replace(/\/+$/, "")}/`).toString();
+  }
+
+  return new URL(path, `${req.protocol}://${req.get("host") ?? "localhost"}`).toString();
+}
+
+function isTaskFileAlias(value: string): value is TaskFileAlias {
+  return ["source", "cleaned", "annotated", "model"].includes(value);
+}
 
 function getSingleRouteParam(value: string | string[] | undefined, fieldName: string): string {
   if (typeof value === "string") {
@@ -126,6 +155,44 @@ function getTaskFileInfo(task: TaskRow, alias: TaskFileAlias) {
         originalName: task.modelFileName,
       };
   }
+}
+
+function getAccessibleTaskFile(
+  task: TaskRow,
+  user: AuthenticatedUser,
+  alias: TaskFileAlias,
+  errorAction: "下载" | "预览" = "下载",
+): {
+  storageKey: string;
+  originalName: string;
+} {
+  if (!canAccessTask(task, user)) {
+    throw new AppError(`当前用户无权${errorAction}该文件。`, {
+      statusCode: 403,
+      code: "FORBIDDEN_FILE_ACCESS",
+    });
+  }
+
+  if (user.role !== "admin" && !getAllowedFileAliases(user.role).includes(alias)) {
+    throw new AppError(`当前角色无权${errorAction}该文件。`, {
+      statusCode: 403,
+      code: "FORBIDDEN_FILE_ACCESS",
+    });
+  }
+
+  const fileInfo = getTaskFileInfo(task, alias);
+
+  if (!fileInfo.storageKey || !fileInfo.originalName) {
+    throw new AppError("任务文件不存在。", {
+      statusCode: 404,
+      code: "TASK_FILE_NOT_FOUND",
+    });
+  }
+
+  return {
+    storageKey: fileInfo.storageKey,
+    originalName: fileInfo.originalName,
+  };
 }
 
 function getMyRole(task: TaskRow, user: AuthenticatedUser): UserRole {
@@ -292,23 +359,8 @@ async function getPreviewableTaskFile(
     });
   }
 
-  if (user.role !== "admin" && !getAllowedFileAliases(user.role).includes(alias)) {
-    throw new AppError("当前角色无权预览该文件。", {
-      statusCode: 403,
-      code: "FORBIDDEN_FILE_ACCESS",
-    });
-  }
-
   assertPreviewableTaskAlias(alias);
-
-  const fileInfo = getTaskFileInfo(task, alias);
-
-  if (!fileInfo.storageKey || !fileInfo.originalName) {
-    throw new AppError("任务文件不存在。", {
-      statusCode: 404,
-      code: "TASK_FILE_NOT_FOUND",
-    });
-  }
+  const fileInfo = getAccessibleTaskFile(task, user, alias, "预览");
 
   if (getFileExtension(fileInfo.originalName) !== ".zip") {
     throw new AppError("当前压缩包格式暂不支持预览，当前仅支持 zip 预览。", {
@@ -551,21 +603,139 @@ export const downloadTaskFileHandler: RequestHandler = async (req, res) => {
     });
   }
 
-  if (!["source", "cleaned", "annotated", "model"].includes(alias)) {
+  if (!isTaskFileAlias(alias)) {
+    throw new AppError("不支持的文件类型。", {
+      statusCode: 400,
+      code: "INVALID_FILE_ALIAS",
+    });
+  }
+  const fileInfo = getAccessibleTaskFile(task, authUser, alias, "下载");
+
+  const absolutePath = await ensureStoredFileExists(fileInfo.storageKey);
+
+  res.download(absolutePath, fileInfo.originalName);
+};
+
+export const createTaskFileDownloadLinkHandler: RequestHandler = async (req, res) => {
+  const authUser = getAuthUser(req);
+  const taskId = parsePositiveInteger(getSingleRouteParam(req.params.taskId, "taskId"), "taskId");
+  const alias = getSingleRouteParam(req.params.fileAlias, "fileAlias");
+  const task = await findTaskById(taskId);
+
+  if (!task) {
+    throw new AppError("任务不存在。", {
+      statusCode: 404,
+      code: "TASK_NOT_FOUND",
+    });
+  }
+
+  if (!isTaskFileAlias(alias)) {
     throw new AppError("不支持的文件类型。", {
       statusCode: 400,
       code: "INVALID_FILE_ALIAS",
     });
   }
 
-  if (authUser.role !== "admin" && !getAllowedFileAliases(authUser.role).includes(alias)) {
-    throw new AppError("当前角色无权下载该文件。", {
-      statusCode: 403,
-      code: "FORBIDDEN_FILE_ACCESS",
+  // 这里复用真实下载权限校验，避免复制链接绕过角色限制。
+  getAccessibleTaskFile(task, authUser, alias, "下载");
+
+  const env = req.app.get("envConfig") as {
+    downloadLinkSecret: string;
+    downloadLinkTtlMs: number;
+  };
+  const expiresAt = Date.now() + env.downloadLinkTtlMs;
+  const signature = createDownloadLinkSignature(
+    taskId,
+    alias,
+    expiresAt,
+    env.downloadLinkSecret,
+  );
+  const url = buildAbsoluteUrl(
+    req,
+    `${DOWNLOAD_LINK_ROUTE}?taskId=${taskId}&fileAlias=${alias}&expiresAt=${expiresAt}&signature=${encodeURIComponent(signature)}`,
+  );
+
+  res.json({
+    url,
+    expiresAt: new Date(expiresAt).toISOString(),
+  });
+};
+
+export const publicDownloadTaskFileHandler: RequestHandler = async (req, res) => {
+  const taskIdRaw = typeof req.query.taskId === "string" ? req.query.taskId : undefined;
+  const fileAlias = typeof req.query.fileAlias === "string" ? req.query.fileAlias : undefined;
+  const expiresAtRaw = typeof req.query.expiresAt === "string" ? req.query.expiresAt : undefined;
+  const signature = typeof req.query.signature === "string" ? req.query.signature : undefined;
+
+  if (!taskIdRaw) {
+    throw new AppError("下载链接缺少任务编号。", {
+      statusCode: 400,
+      code: "INVALID_DOWNLOAD_LINK",
     });
   }
 
-  const fileInfo = getTaskFileInfo(task, alias);
+  const taskId = parsePositiveInteger(taskIdRaw, "taskId");
+
+  if (!fileAlias || !isTaskFileAlias(fileAlias)) {
+    throw new AppError("不支持的文件类型。", {
+      statusCode: 400,
+      code: "INVALID_FILE_ALIAS",
+    });
+  }
+
+  if (!expiresAtRaw || !signature) {
+    throw new AppError("下载链接缺少必要参数。", {
+      statusCode: 400,
+      code: "INVALID_DOWNLOAD_LINK",
+    });
+  }
+
+  const expiresAt = Number(expiresAtRaw);
+
+  if (!Number.isInteger(expiresAt)) {
+    throw new AppError("下载链接参数不正确。", {
+      statusCode: 400,
+      code: "INVALID_DOWNLOAD_LINK",
+    });
+  }
+
+  if (expiresAt <= Date.now()) {
+    throw new AppError("下载链接已失效，请重新复制。", {
+      statusCode: 410,
+      code: "DOWNLOAD_LINK_EXPIRED",
+    });
+  }
+
+  const env = req.app.get("envConfig") as {
+    downloadLinkSecret: string;
+  };
+  const expectedSignature = createDownloadLinkSignature(
+    taskId,
+    fileAlias,
+    expiresAt,
+    env.downloadLinkSecret,
+  );
+
+  if (
+    signature.length !== expectedSignature.length ||
+    !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature))
+  ) {
+    throw new AppError("下载链接无效或已被篡改。", {
+      statusCode: 403,
+      code: "INVALID_DOWNLOAD_LINK",
+    });
+  }
+
+  const task = await findTaskById(taskId);
+
+  if (!task) {
+    throw new AppError("任务不存在。", {
+      statusCode: 404,
+      code: "TASK_NOT_FOUND",
+    });
+  }
+
+  const fileInfo = getTaskFileInfo(task, fileAlias);
 
   if (!fileInfo.storageKey || !fileInfo.originalName) {
     throw new AppError("任务文件不存在。", {
@@ -575,7 +745,6 @@ export const downloadTaskFileHandler: RequestHandler = async (req, res) => {
   }
 
   const absolutePath = await ensureStoredFileExists(fileInfo.storageKey);
-
   res.download(absolutePath, fileInfo.originalName);
 };
 

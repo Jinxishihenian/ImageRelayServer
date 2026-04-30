@@ -11,8 +11,10 @@ const DEFAULT_DB_PORT = 3306;
 const DEFAULT_DB_USER = "root";
 const DEFAULT_DB_NAME = "wss_image_relay";
 const DEFAULT_AUTH_TOKEN_SECRET = "image-relay-dev-secret";
+const DEFAULT_DOWNLOAD_LINK_SECRET = "image-relay-download-link-secret";
 const DEFAULT_MAX_UPLOAD_SIZE_MB = 50;
 const VALID_NODE_ENVS = new Set(["development", "test", "production"]);
+const DOWNLOAD_LINK_TTL_MS = 60 * 60 * 1000;
 
 export type AppEnv = {
   nodeEnv: "development" | "test" | "production";
@@ -25,6 +27,8 @@ export type AppEnv = {
   dbPassword: string;
   dbName: string;
   authTokenSecret: string;
+  downloadLinkSecret: string;
+  downloadLinkTtlMs: number;
   fileStorageDir: string;
   fileBaseUrl: string;
   maxUploadSizeBytes: number;
@@ -128,6 +132,12 @@ export function loadEnv(): AppEnv {
       "AUTH_TOKEN_SECRET",
       DEFAULT_AUTH_TOKEN_SECRET,
     ),
+    downloadLinkSecret: parseRequiredString(
+      process.env.DOWNLOAD_LINK_SECRET,
+      "DOWNLOAD_LINK_SECRET",
+      DEFAULT_DOWNLOAD_LINK_SECRET,
+    ),
+    downloadLinkTtlMs: DOWNLOAD_LINK_TTL_MS,
     fileStorageDir: parseFileStorageDir(process.env.FILE_STORAGE_DIR),
     fileBaseUrl: parseOptionalString(process.env.FILE_BASE_URL),
     maxUploadSizeBytes: parseMaxUploadSizeBytes(process.env.MAX_UPLOAD_SIZE_MB),

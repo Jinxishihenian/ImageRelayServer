@@ -7,12 +7,14 @@ import { getPing } from "../controllers/ping.controller.js";
 import { uploadFileHandler } from "../files/file.controller.js";
 import {
   completeTaskStageHandler,
+  createTaskFileDownloadLinkHandler,
   createTaskHandler,
   deleteTaskHandler,
   downloadTaskFileHandler,
   getTaskDetailHandler,
   listTasksHandler,
   listTaskFilePreviewHandler,
+  publicDownloadTaskFileHandler,
   previewTaskFileImageHandler,
 } from "../tasks/tasks.controller.js";
 import {
@@ -38,12 +40,18 @@ export function createApiRouter(env: AppEnv) {
   apiRouter.delete("/tasks/:taskId", authRequired, requireRoles("admin"), deleteTaskHandler);
   apiRouter.post("/tasks/:taskId/complete-stage", authRequired, completeTaskStageHandler);
   apiRouter.get("/tasks/:taskId/files/:fileAlias/download", authRequired, downloadTaskFileHandler);
+  apiRouter.get(
+    "/tasks/:taskId/files/:fileAlias/download-link",
+    authRequired,
+    createTaskFileDownloadLinkHandler,
+  );
   apiRouter.get("/tasks/:taskId/files/:fileAlias/preview", authRequired, listTaskFilePreviewHandler);
   apiRouter.get(
     "/tasks/:taskId/files/:fileAlias/preview/:entryId",
     authRequired,
     previewTaskFileImageHandler,
   );
+  apiRouter.get("/public/task-files/download", publicDownloadTaskFileHandler);
   apiRouter.post(
     "/files/upload",
     authRequired,

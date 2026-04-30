@@ -22,6 +22,9 @@ export function createApp(env: AppEnv, dependencies: AppDependencies = {}) {
   const resolveDatabaseHealthStatus =
     dependencies.getDatabaseHealthStatus ?? getDatabaseHealthStatus;
 
+  app.set("envConfig", env);
+  app.set("fileBaseUrl", env.fileBaseUrl);
+
   app.disable("x-powered-by");
 
   app.use(helmet());
