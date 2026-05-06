@@ -40,6 +40,23 @@ export function createApp(env: AppEnv, dependencies: AppDependencies = {}) {
 
         callback(new Error(`不允许的跨域来源: ${origin}`));
       },
+      methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+      allowedHeaders: [
+        "Authorization",
+        "Content-Type",
+        "Tus-Resumable",
+        "Upload-Length",
+        "Upload-Offset",
+        "Upload-Metadata",
+      ],
+      exposedHeaders: [
+        "Location",
+        "Upload-Offset",
+        "Upload-Length",
+        "Tus-Resumable",
+        "Tus-Version",
+        "Tus-Extension",
+      ],
     }),
   );
 

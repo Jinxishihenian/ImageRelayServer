@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 import request from "supertest";
 
 import { createApp } from "../dist/app/create-app.js";
+import { createAuthToken } from "../dist/auth/token.js";
 import { getAllowedFileAliases } from "../dist/common/role-status.js";
 import { loadEnv } from "../dist/config/env.js";
+import { initializeFileStorage } from "../dist/files/file-storage.js";
 
 const baseEnv = {
   nodeEnv: "test",
@@ -17,7 +21,7 @@ const baseEnv = {
   dbPassword: "test-password",
   dbName: "wss_image_relay",
   authTokenSecret: "test-secret",
-  fileStorageDir: "D:/ImageRelay/data/test-files",
+  fileStorageDir: "D:/ImageRelay/server/.tmp/test-files",
   fileBaseUrl: "",
   maxUploadSizeBytes: 2 * 1024 * 1024,
 };
@@ -29,6 +33,7 @@ const app = createApp(baseEnv, {
 });
 
 async function run() {
+  await initializeFileStorage(baseEnv);
   assert.deepEqual(getAllowedFileAliases("trainer"), ["source", "cleaned", "annotated"]);
 
   const healthResponse = await request(app).get("/health");
@@ -58,6 +63,93 @@ async function run() {
   assert.equal(degradedHealthResponse.body.database.status, "down");
   assert.equal(degradedHealthResponse.body.database.message, "simulated database outage");
 
+  const uploadToken = createAuthToken(
+    {
+      id: 1,
+      username: "admin01",
+      role: "admin",
+    },
+    baseEnv.authTokenSecret,
+  );
+  const uploadFilePath = path.join(baseEnv.fileStorageDir, "smoke-upload.txt");
+  await fs.mkdir(baseEnv.fileStorageDir, { recursive: true });
+  await fs.writeFile(uploadFilePath, "smoke upload");
+
+  const uploadResponse = await request(app)
+    .post("/api/v1/files/upload")
+    .set("Authorization", `Bearer ${uploadToken}`)
+    .field("originalName", "smoke-upload.txt")
+    .field("purpose", "task_model")
+    .attach("file", uploadFilePath, {
+      filename: "smoke-upload.txt",
+      contentType: "text/plain",
+    });
+
+  assert.equal(uploadResponse.status, 201);
+  assert.equal(uploadResponse.body.item.originalName, "smoke-upload.txt");
+  assert.equal(uploadResponse.body.item.mimeType, "text/plain");
+  assert.equal(uploadResponse.body.item.size, 12);
+
+  const tusCreateResponse = await request(app)
+    .post("/api/v1/files/tus")
+    .set("Authorization", `Bearer ${uploadToken}`)
+    .set("Tus-Resumable", "1.0.0")
+    .set("Upload-Length", "12")
+    .set(
+      "Upload-Metadata",
+      `originalName ${Buffer.from("smoke-upload.txt").toString("base64")},mimeType ${Buffer.from("text/plain").toString("base64")},purpose ${Buffer.from("task_model").toString("base64")}`,
+    )
+    .send();
+
+  assert.equal(tusCreateResponse.status, 201);
+  assert.equal(tusCreateResponse.headers["tus-resumable"], "1.0.0");
+  assert.equal(tusCreateResponse.headers["upload-offset"], "0");
+
+  const uploadLocation = tusCreateResponse.headers.location;
+  assert.equal(typeof uploadLocation, "string");
+
+  const tusHeadBeforePatchResponse = await request(app)
+    .head(uploadLocation)
+    .set("Authorization", `Bearer ${uploadToken}`)
+    .set("Tus-Resumable", "1.0.0");
+
+  assert.equal(tusHeadBeforePatchResponse.status, 200);
+  assert.equal(tusHeadBeforePatchResponse.headers["upload-offset"], "0");
+  assert.equal(tusHeadBeforePatchResponse.headers["upload-length"], "12");
+
+  const tusPatchResponse = await request(app)
+    .patch(uploadLocation)
+    .set("Authorization", `Bearer ${uploadToken}`)
+    .set("Tus-Resumable", "1.0.0")
+    .set("Upload-Offset", "0")
+    .set("Content-Type", "application/offset+octet-stream")
+    .send("smoke upload");
+
+  assert.equal(tusPatchResponse.status, 204);
+  assert.equal(tusPatchResponse.headers["upload-offset"], "12");
+
+  const tusHeadAfterPatchResponse = await request(app)
+    .head(uploadLocation)
+    .set("Authorization", `Bearer ${uploadToken}`)
+    .set("Tus-Resumable", "1.0.0");
+
+  assert.equal(tusHeadAfterPatchResponse.status, 200);
+  assert.equal(tusHeadAfterPatchResponse.headers["upload-offset"], "12");
+
+  const uploadId = uploadLocation.split("/").pop();
+  assert.equal(typeof uploadId, "string");
+  assert.ok(uploadId);
+
+  const finalizeResponse = await request(app)
+    .post(`/api/v1/files/uploads/${uploadId}/complete`)
+    .set("Authorization", `Bearer ${uploadToken}`)
+    .send();
+
+  assert.equal(finalizeResponse.status, 201);
+  assert.equal(finalizeResponse.body.item.originalName, "smoke-upload.txt");
+  assert.equal(finalizeResponse.body.item.mimeType, "text/plain");
+  assert.equal(finalizeResponse.body.item.size, 12);
+
   const originalEnv = { ...process.env };
 
   try {
@@ -65,10 +157,10 @@ async function run() {
     delete process.env.HOST;
     process.env.PORT = "3001";
     process.env.CORS_ORIGINS = "http://a.example.com, http://b.example.com";
-    process.env.DB_HOST = "192.168.1.132";
+    process.env.DB_HOST = "127.0.0.1";
     process.env.DB_PORT = "3306";
     process.env.DB_USER = "root";
-    process.env.DB_PASSWORD = "123456";
+    process.env.DB_PASSWORD = "Abc@12345";
     process.env.DB_NAME = "wss_image_relay";
     process.env.AUTH_TOKEN_SECRET = "local-test-secret";
     process.env.FILE_STORAGE_DIR = "D:/ImageRelay/data/local-files";
@@ -77,10 +169,10 @@ async function run() {
 
     const loadedEnv = loadEnv();
     assert.equal(loadedEnv.host, "0.0.0.0");
-    assert.equal(loadedEnv.dbHost, "192.168.1.132");
+    assert.equal(loadedEnv.dbHost, "127.0.0.1");
     assert.equal(loadedEnv.dbPort, 3306);
     assert.equal(loadedEnv.dbUser, "root");
-    assert.equal(loadedEnv.dbPassword, "123456");
+    assert.equal(loadedEnv.dbPassword, "Abc@12345");
     assert.equal(loadedEnv.dbName, "wss_image_relay");
     assert.equal(loadedEnv.authTokenSecret, "local-test-secret");
     assert.equal(loadedEnv.fileBaseUrl, "http://localhost:3000");
@@ -101,7 +193,7 @@ async function run() {
     delete process.env.DB_PASSWORD;
     assert.throws(() => loadEnv(), /DB_PASSWORD/);
 
-    process.env.DB_PASSWORD = "123456";
+    process.env.DB_PASSWORD = "Abc@12345";
     process.env.MAX_UPLOAD_SIZE_MB = "70000";
     assert.throws(() => loadEnv(), /MAX_UPLOAD_SIZE_MB/);
   } finally {

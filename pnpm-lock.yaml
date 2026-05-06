@@ -20,6 +20,9 @@ importers:
       express:
         specifier: ^5.1.0
         version: 5.2.1
+      formidable:
+        specifier: ^3.5.4
+        version: 3.5.4
       helmet:
         specifier: ^8.1.0
         version: 8.1.0

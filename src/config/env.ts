@@ -6,7 +6,7 @@ dotenv.config();
 
 const DEFAULT_HOST = "0.0.0.0";
 const DEFAULT_PORT = 3000;
-const DEFAULT_DB_HOST = "192.168.1.132";
+const DEFAULT_DB_HOST = "127.0.0.1";
 const DEFAULT_DB_PORT = 3306;
 const DEFAULT_DB_USER = "root";
 const DEFAULT_DB_NAME = "wss_image_relay";

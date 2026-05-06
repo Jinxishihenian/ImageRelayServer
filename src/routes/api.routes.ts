@@ -4,7 +4,16 @@ import { createLoginHandler } from "../auth/auth.controller.js";
 import { requireAuth, requireRoles } from "../auth/auth.middleware.js";
 import type { AppEnv } from "../config/env.js";
 import { getPing } from "../controllers/ping.controller.js";
-import { uploadFileHandler } from "../files/file.controller.js";
+import {
+  completeUploadSessionHandler,
+  createUploadSessionHandler,
+  tusBindHandler,
+  tusCreateHandler,
+  tusHeadHandler,
+  tusOptionsHandler,
+  tusPatchHandler,
+  uploadFileHandler,
+} from "../files/file.controller.js";
 import {
   completeTaskStageHandler,
   createTaskFileDownloadLinkHandler,
@@ -52,15 +61,15 @@ export function createApiRouter(env: AppEnv) {
     previewTaskFileImageHandler,
   );
   apiRouter.get("/public/task-files/download", publicDownloadTaskFileHandler);
-  apiRouter.post(
-    "/files/upload",
-    authRequired,
-    express.raw({
-      limit: env.maxUploadSizeBytes,
-      type: () => true,
-    }),
-    uploadFileHandler,
-  );
+  apiRouter.post("/files/uploads", authRequired, createUploadSessionHandler);
+  apiRouter.post("/files/uploads/:uploadId/complete", authRequired, completeUploadSessionHandler);
+  apiRouter.options("/files/tus", authRequired, tusOptionsHandler);
+  apiRouter.post("/files/tus", authRequired, tusCreateHandler);
+  apiRouter.options("/files/tus/:uploadId", authRequired, tusOptionsHandler);
+  apiRouter.post("/files/tus/:uploadId", authRequired, tusBindHandler);
+  apiRouter.head("/files/tus/:uploadId", authRequired, tusHeadHandler);
+  apiRouter.patch("/files/tus/:uploadId", authRequired, tusPatchHandler);
+  apiRouter.post("/files/upload", authRequired, uploadFileHandler);
 
   return apiRouter;
 }

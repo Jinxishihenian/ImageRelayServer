@@ -91,19 +91,6 @@ function createArchiveReadError(error: unknown): AppError {
   });
 }
 
-function openZipFromBuffer(buffer: Buffer): Promise<ZipFile> {
-  return new Promise((resolve, reject) => {
-    yauzl.fromBuffer(buffer, { lazyEntries: true, decodeStrings: true }, (error, zipFile) => {
-      if (error || !zipFile) {
-        reject(createArchiveReadError(error));
-        return;
-      }
-
-      resolve(zipFile);
-    });
-  });
-}
-
 function openZipFromFile(filePath: string, autoClose: boolean): Promise<ZipFile> {
   return new Promise((resolve, reject) => {
     yauzl.open(filePath, { lazyEntries: true, decodeStrings: true, autoClose }, (error, zipFile) => {
@@ -231,7 +218,7 @@ export function parseUploadPurpose(value: string | string[] | undefined): Upload
 }
 
 export async function validateUploadContent(
-  buffer: Buffer,
+  source: Buffer | string,
   originalName: string,
   purpose: UploadPurpose | undefined,
 ): Promise<void> {
@@ -250,7 +237,16 @@ export async function validateUploadContent(
 
   // 只有 zip 能在当前后端内稳定做目录级深度校验；rar/7z 本次仍保留后缀上传能力。
   if ((purpose === "task_source" || purpose === "task_cleaned") && getFileExtension(originalName) === ZIP_EXTENSION) {
-    const zipFile = await openZipFromBuffer(buffer);
+    const zipFile = typeof source === "string" ? await openZipFromFile(source, false) : await new Promise<ZipFile>((resolve, reject) => {
+      yauzl.fromBuffer(source, { lazyEntries: true, decodeStrings: true }, (error, zipFile) => {
+        if (error || !zipFile) {
+          reject(createArchiveReadError(error));
+          return;
+        }
+
+        resolve(zipFile);
+      });
+    });
     let imageCount = 0;
 
     try {
