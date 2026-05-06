@@ -46,6 +46,35 @@ async function run() {
   assert.equal(pingResponse.status, 200);
   assert.deepEqual(pingResponse.body, { message: "pong" });
 
+  const adminToken = createAuthToken(
+    {
+      id: 1,
+      username: "admin01",
+      role: "admin",
+    },
+    baseEnv.authTokenSecret,
+  );
+  const trainerToken = createAuthToken(
+    {
+      id: 4,
+      username: "trainer01",
+      role: "trainer",
+    },
+    baseEnv.authTokenSecret,
+  );
+
+  const modelListResponse = await request(app)
+    .get("/api/v1/models")
+    .set("Authorization", `Bearer ${adminToken}`);
+  assert.equal(modelListResponse.status, 200);
+  assert.ok(Array.isArray(modelListResponse.body.items));
+  assert.equal(typeof modelListResponse.body.pagination.total, "number");
+
+  const forbiddenModelListResponse = await request(app)
+    .get("/api/v1/models")
+    .set("Authorization", `Bearer ${trainerToken}`);
+  assert.equal(forbiddenModelListResponse.status, 403);
+
   const notFoundResponse = await request(app).get("/missing-route");
   assert.equal(notFoundResponse.status, 404);
   assert.equal(notFoundResponse.body.error.code, "ROUTE_NOT_FOUND");
@@ -63,14 +92,7 @@ async function run() {
   assert.equal(degradedHealthResponse.body.database.status, "down");
   assert.equal(degradedHealthResponse.body.database.message, "simulated database outage");
 
-  const uploadToken = createAuthToken(
-    {
-      id: 1,
-      username: "admin01",
-      role: "admin",
-    },
-    baseEnv.authTokenSecret,
-  );
+  const uploadToken = adminToken;
   const uploadFilePath = path.join(baseEnv.fileStorageDir, "smoke-upload.txt");
   await fs.mkdir(baseEnv.fileStorageDir, { recursive: true });
   await fs.writeFile(uploadFilePath, "smoke upload");

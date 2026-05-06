@@ -21,6 +21,7 @@ import {
   deleteTaskHandler,
   downloadTaskFileHandler,
   getTaskDetailHandler,
+  listModelsHandler,
   listTasksHandler,
   listTaskFilePreviewHandler,
   publicDownloadTaskFileHandler,
@@ -43,6 +44,7 @@ export function createApiRouter(env: AppEnv) {
   apiRouter.post("/users", authRequired, requireRoles("admin"), createUserHandler);
   apiRouter.put("/users/:userId", authRequired, requireRoles("admin"), updateUserHandler);
   apiRouter.delete("/users/:userId", authRequired, requireRoles("admin"), deleteUserHandler);
+  apiRouter.get("/models", authRequired, requireRoles("admin"), listModelsHandler);
   apiRouter.get("/tasks", authRequired, listTasksHandler);
   apiRouter.get("/tasks/:taskId", authRequired, getTaskDetailHandler);
   apiRouter.post("/tasks", authRequired, requireRoles("admin"), createTaskHandler);

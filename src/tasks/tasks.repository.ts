@@ -67,6 +67,11 @@ type TaskListScope = {
 
 type TaskListFilters = {
   keyword?: string;
+  status?: TaskStatus;
+};
+
+type ModelListFilters = {
+  keyword?: string;
 };
 
 export type TaskListSummary = {
@@ -81,6 +86,25 @@ export type PaginatedTasksResult = {
   pageSize: number;
   total: number;
   summary: TaskListSummary;
+};
+
+export type ModelListItem = {
+  taskId: number;
+  taskTitle: string;
+  modelFileName: string;
+  trainerRemark: string | null;
+  finishedAt: string;
+  trainer: {
+    id: number;
+    username: string;
+  };
+};
+
+export type PaginatedModelsResult = {
+  items: ModelListItem[];
+  page: number;
+  pageSize: number;
+  total: number;
 };
 
 type CreateTaskInput = {
@@ -206,6 +230,11 @@ function buildTaskListFilter(scope: TaskListScope, filters?: TaskListFilters): {
     params.push(`%${filters.keyword}%`);
   }
 
+  if (filters?.status) {
+    conditions.push("t.status = ?");
+    params.push(filters.status);
+  }
+
   return {
     whereClause: conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "",
     params,
@@ -255,16 +284,69 @@ type TaskSummaryRow = RowDataPacket & {
   finished_count: number | null;
 };
 
+type ModelListRow = RowDataPacket & {
+  task_id: number;
+  task_title: string;
+  model_file_name: string;
+  trainer_remark: string | null;
+  finished_at: Date | string;
+  trainer_id: number;
+  trainer_username: string;
+};
+
+type ModelSummaryRow = RowDataPacket & {
+  total: number;
+};
+
+function buildModelListFilter(filters?: ModelListFilters): {
+  whereClause: string;
+  params: Array<number | string>;
+} {
+  const conditions = [
+    "t.status = 'finished'",
+    "t.model_file IS NOT NULL",
+    "t.model_file_name IS NOT NULL",
+  ];
+  const params: Array<number | string> = [];
+
+  if (filters?.keyword) {
+    // 模型列表按任务名与模型文件名做模糊搜索，避免额外扩展不必要的查询范围。
+    conditions.push("(t.title LIKE ? OR t.model_file_name LIKE ?)");
+    params.push(`%${filters.keyword}%`, `%${filters.keyword}%`);
+  }
+
+  return {
+    whereClause: `WHERE ${conditions.join(" AND ")}`,
+    params,
+  };
+}
+
+function mapModelListRow(row: ModelListRow): ModelListItem {
+  return {
+    taskId: row.task_id,
+    taskTitle: row.task_title,
+    modelFileName: row.model_file_name,
+    trainerRemark: row.trainer_remark,
+    finishedAt: toIsoString(row.finished_at),
+    trainer: {
+      id: row.trainer_id,
+      username: row.trainer_username,
+    },
+  };
+}
+
 export async function listTasksForUser(
   scope: TaskListScope,
   input: {
     page: number;
     pageSize: number;
     keyword?: string;
+    status?: TaskStatus;
   },
 ): Promise<PaginatedTasksResult> {
   const listFilter = buildTaskListFilter(scope, {
     keyword: input.keyword,
+    status: input.status,
   });
   const actionableSummary = getActionableSummarySql(scope);
   const summaryRows = await query<TaskSummaryRow[]>(
@@ -306,6 +388,53 @@ export async function listTasksForUser(
     pageSize: input.pageSize,
     total: summary.total,
     summary,
+  };
+}
+
+export async function listModels(input: {
+  page: number;
+  pageSize: number;
+  keyword?: string;
+}): Promise<PaginatedModelsResult> {
+  const listFilter = buildModelListFilter({
+    keyword: input.keyword,
+  });
+  const summaryRows = await query<ModelSummaryRow[]>(
+    `
+      SELECT COUNT(*) AS total
+      FROM tasks t
+      ${listFilter.whereClause}
+    `,
+    listFilter.params,
+  );
+  const total = Number(summaryRows[0]?.total ?? 0);
+  const totalPages = total === 0 ? 0 : Math.ceil(total / input.pageSize);
+  const page = totalPages > 0 ? Math.min(input.page, totalPages) : input.page;
+  const offset = (page - 1) * input.pageSize;
+  const rows = await query<ModelListRow[]>(
+    `
+      SELECT
+        t.id AS task_id,
+        t.title AS task_title,
+        t.model_file_name,
+        t.trainer_remark,
+        t.finished_at,
+        trainer.id AS trainer_id,
+        trainer.username AS trainer_username
+      FROM tasks t
+      INNER JOIN users trainer ON trainer.id = t.trainer_id
+      ${listFilter.whereClause}
+      ORDER BY t.finished_at DESC, t.id DESC
+      LIMIT ? OFFSET ?
+    `,
+    [...listFilter.params, input.pageSize, offset],
+  );
+
+  return {
+    items: rows.map(mapModelListRow),
+    page,
+    pageSize: input.pageSize,
+    total,
   };
 }
 

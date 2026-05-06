@@ -40,9 +40,12 @@ import {
   createTask,
   deleteTaskById,
   findTaskById,
+  listModels,
   listTasksForUser,
+  type ModelListItem,
   type TaskRow,
 } from "./tasks.repository.js";
+import { TASK_STATUSES, type TaskStatus } from "../types/domain.js";
 
 const DOWNLOAD_LINK_ROUTE = "/api/v1/public/task-files/download";
 
@@ -263,6 +266,23 @@ function mapTaskDetail(task: TaskRow, user: AuthenticatedUser) {
   };
 }
 
+function mapModelListItem(item: ModelListItem) {
+  return {
+    taskId: item.taskId,
+    taskTitle: item.taskTitle,
+    modelFileName: item.modelFileName,
+    trainerRemark: item.trainerRemark,
+    finishedAt: item.finishedAt,
+    trainer: item.trainer,
+    download: {
+      alias: "model" as const,
+      label: FILE_LABELS.model,
+      fileName: item.modelFileName,
+      endpoint: `/api/v1/tasks/${item.taskId}/files/model/download`,
+    },
+  };
+}
+
 async function validateTaskAssignees(cleanerId: number, annotatorId: number, trainerId: number) {
   const users = await findUsersByIds([cleanerId, annotatorId, trainerId]);
   const userMap = new Map(users.map((user) => [user.id, user]));
@@ -376,19 +396,55 @@ async function getPreviewableTaskFile(
   };
 }
 
+function parseOptionalTaskStatus(value: unknown): TaskStatus | undefined {
+  const normalizedStatus = parseOptionalString(value, "status");
+
+  if (!normalizedStatus) {
+    return undefined;
+  }
+
+  if (TASK_STATUSES.includes(normalizedStatus as TaskStatus)) {
+    return normalizedStatus as TaskStatus;
+  }
+
+  throw new AppError("status 查询参数无效。", {
+    statusCode: 400,
+    code: "INVALID_TASK_STATUS",
+    details: {
+      field: "status",
+    },
+  });
+}
+
 export const listTasksHandler: RequestHandler = async (req, res) => {
   const authUser = getAuthUser(req);
   const pagination = parsePaginationQuery(req.query);
   const keyword = parseOptionalString(req.query.keyword, "keyword");
+  const status = parseOptionalTaskStatus(req.query.status);
   const taskPage = await listTasksForUser(authUser, {
     ...pagination,
     keyword,
+    status,
   });
 
   res.json({
     items: taskPage.items.map((task) => mapTaskSummary(task, authUser)),
     pagination: buildPaginationMeta(taskPage.page, taskPage.pageSize, taskPage.total),
     summary: taskPage.summary,
+  });
+};
+
+export const listModelsHandler: RequestHandler = async (req, res) => {
+  const pagination = parsePaginationQuery(req.query);
+  const keyword = parseOptionalString(req.query.keyword, "keyword");
+  const modelPage = await listModels({
+    ...pagination,
+    keyword,
+  });
+
+  res.json({
+    items: modelPage.items.map(mapModelListItem),
+    pagination: buildPaginationMeta(modelPage.page, modelPage.pageSize, modelPage.total),
   });
 };
 
