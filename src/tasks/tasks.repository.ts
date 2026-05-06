@@ -374,8 +374,8 @@ export async function listTasksForUser(
       ${getBaseTaskSelectSql()}
       ${listFilter.whereClause}
       ORDER BY
-        FIELD(t.status, 'pending_clean', 'pending_annotate', 'pending_train', 'finished'),
         t.created_at DESC,
+        -- 创建时间可能精确到秒，使用主键倒序兜底，保证分页顺序稳定。
         t.id DESC
       LIMIT ? OFFSET ?
     `,
