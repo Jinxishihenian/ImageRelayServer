@@ -3,6 +3,7 @@ import type { ResultSetHeader, RowDataPacket } from "mysql2";
 import { execute, query } from "../database/mysql.js";
 import type { TaskStatus, UserRole } from "../types/domain.js";
 import { toIsoString } from "../common/date.js";
+import { buildTaskVisibilitySql } from "./task-visibility.js";
 
 export type TaskRow = {
   id: number;
@@ -194,35 +195,17 @@ function getBaseTaskSelectSql(): string {
   `;
 }
 
-function getTaskScopeFilter(scope: TaskListScope): {
-  whereClause: string;
-  params: number[];
-} {
-  if (scope.role === "admin") {
-    return {
-      whereClause: "",
-      params: [],
-    };
-  }
-
-  return {
-    whereClause: `
-      WHERE t.cleaner_id = ? OR t.annotator_id = ? OR t.trainer_id = ?
-    `,
-    params: [scope.id, scope.id, scope.id],
-  };
-}
-
 function buildTaskListFilter(scope: TaskListScope, filters?: TaskListFilters): {
   whereClause: string;
   params: Array<number | string>;
 } {
   const conditions: string[] = [];
   const params: Array<number | string> = [];
+  const visibilitySql = buildTaskVisibilitySql(scope, "t");
 
-  if (scope.role !== "admin") {
-    conditions.push("(t.cleaner_id = ? OR t.annotator_id = ? OR t.trainer_id = ?)");
-    params.push(scope.id, scope.id, scope.id);
+  if (visibilitySql.condition) {
+    conditions.push(visibilitySql.condition);
+    params.push(...visibilitySql.params);
   }
 
   if (filters?.keyword) {

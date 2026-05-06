@@ -48,6 +48,7 @@ import {
   type TaskRow,
 } from "./tasks.repository.js";
 import { TASK_STATUSES, type TaskStatus } from "../types/domain.js";
+import { canUserAccessTask } from "./task-visibility.js";
 
 const DOWNLOAD_LINK_ROUTE = "/api/v1/public/task-files/download";
 const RANGE_HEADER_PREFIX = "bytes=";
@@ -91,11 +92,7 @@ function getSingleRouteParam(value: string | string[] | undefined, fieldName: st
 }
 
 function canAccessTask(task: TaskRow, user: AuthenticatedUser): boolean {
-  if (user.role === "admin") {
-    return true;
-  }
-
-  return [task.cleanerId, task.annotatorId, task.trainerId].includes(user.id);
+  return canUserAccessTask(task, user);
 }
 
 function canHandleCurrentStage(task: TaskRow, user: AuthenticatedUser): boolean {

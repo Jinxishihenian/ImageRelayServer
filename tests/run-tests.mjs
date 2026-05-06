@@ -9,6 +9,10 @@ import { createAuthToken } from "../dist/auth/token.js";
 import { getAllowedFileAliases } from "../dist/common/role-status.js";
 import { loadEnv } from "../dist/config/env.js";
 import { initializeFileStorage } from "../dist/files/file-storage.js";
+import {
+  buildTaskVisibilitySql,
+  canUserAccessTask,
+} from "../dist/tasks/task-visibility.js";
 
 const baseEnv = {
   nodeEnv: "test",
@@ -35,6 +39,109 @@ const app = createApp(baseEnv, {
 async function run() {
   await initializeFileStorage(baseEnv);
   assert.deepEqual(getAllowedFileAliases("trainer"), ["source", "cleaned", "annotated"]);
+  assert.deepEqual(buildTaskVisibilitySql({ id: 1, role: "admin" }, "t"), {
+    condition: "",
+    params: [],
+  });
+  assert.deepEqual(buildTaskVisibilitySql({ id: 2, role: "cleaner" }, "t"), {
+    condition: `(
+      (t.cleaner_id = ? AND status = 'pending_clean')
+      OR (t.cleaner_id = ? AND t.cleaned_file IS NOT NULL)
+    )`,
+    params: [2, 2],
+  });
+
+  const cleanerUser = {
+    id: 2,
+    username: "cleaner01",
+    role: "cleaner",
+  };
+  const annotatorUser = {
+    id: 3,
+    username: "annotator01",
+    role: "annotator",
+  };
+  const trainerUser = {
+    id: 4,
+    username: "trainer01",
+    role: "trainer",
+  };
+
+  assert.equal(
+    canUserAccessTask(
+      {
+        status: "pending_clean",
+        cleanerId: 2,
+        annotatorId: 3,
+        trainerId: 4,
+        cleanedFile: null,
+        annotatedFile: null,
+        modelFile: null,
+      },
+      cleanerUser,
+    ),
+    true,
+  );
+  assert.equal(
+    canUserAccessTask(
+      {
+        status: "pending_train",
+        cleanerId: 2,
+        annotatorId: 3,
+        trainerId: 4,
+        cleanedFile: "tasks/task-1/cleaned.zip",
+        annotatedFile: "tasks/task-1/annotated.zip",
+        modelFile: null,
+      },
+      cleanerUser,
+    ),
+    true,
+  );
+  assert.equal(
+    canUserAccessTask(
+      {
+        status: "pending_clean",
+        cleanerId: 8,
+        annotatorId: 3,
+        trainerId: 4,
+        cleanedFile: null,
+        annotatedFile: null,
+        modelFile: null,
+      },
+      cleanerUser,
+    ),
+    false,
+  );
+  assert.equal(
+    canUserAccessTask(
+      {
+        status: "pending_clean",
+        cleanerId: 2,
+        annotatorId: 3,
+        trainerId: 4,
+        cleanedFile: null,
+        annotatedFile: null,
+        modelFile: null,
+      },
+      annotatorUser,
+    ),
+    false,
+  );
+  assert.equal(
+    canUserAccessTask(
+      {
+        status: "finished",
+        cleanerId: 2,
+        annotatorId: 3,
+        trainerId: 4,
+        cleanedFile: "tasks/task-2/cleaned.zip",
+        annotatedFile: "tasks/task-2/annotated.zip",
+        modelFile: "tasks/task-2/model.bin",
+      },
+      trainerUser,
+    ),
+    true,
+  );
 
   const healthResponse = await request(app).get("/health");
   assert.equal(healthResponse.status, 200);
