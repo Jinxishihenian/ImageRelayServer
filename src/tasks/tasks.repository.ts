@@ -87,6 +87,7 @@ type TaskListScope = {
 type TaskListFilters = {
   keyword?: string;
   status?: TaskStatus;
+  reviewStatus?: TaskReviewStatus;
   flowMode?: TaskFlowMode;
 };
 
@@ -268,6 +269,11 @@ function buildTaskListFilter(scope: TaskListScope, filters?: TaskListFilters): {
     params.push(filters.status);
   }
 
+  if (filters?.reviewStatus) {
+    conditions.push("t.review_status = ?");
+    params.push(filters.reviewStatus);
+  }
+
   if (filters?.flowMode) {
     conditions.push("t.flow_mode = ?");
     params.push(filters.flowMode);
@@ -405,12 +411,14 @@ export async function listTasksForUser(
     pageSize: number;
     keyword?: string;
     status?: TaskStatus;
+    reviewStatus?: TaskReviewStatus;
     flowMode?: TaskFlowMode;
   },
 ): Promise<PaginatedTasksResult> {
   const listFilter = buildTaskListFilter(scope, {
     keyword: input.keyword,
     status: input.status,
+    reviewStatus: input.reviewStatus,
     flowMode: input.flowMode,
   });
   const actionableSummary = getActionableSummarySql(scope);

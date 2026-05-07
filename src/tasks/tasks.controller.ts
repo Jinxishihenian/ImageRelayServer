@@ -36,6 +36,7 @@ import type {
   AuthenticatedUser,
   TaskFlowMode,
   TaskFileAlias,
+  TaskReviewStatus,
   TaskReviewStage,
   UploadedFileRef,
   UserRole,
@@ -58,6 +59,7 @@ import {
 } from "./tasks.repository.js";
 import {
   TASK_FLOW_MODES,
+  TASK_REVIEW_STATUSES,
   TASK_REVIEW_STAGES,
   TASK_STATUSES,
   type TaskStatus,
@@ -674,16 +676,38 @@ function parseOptionalTaskStatus(value: unknown): TaskStatus | undefined {
   });
 }
 
+function parseOptionalTaskReviewStatus(value: unknown): TaskReviewStatus | undefined {
+  const normalizedReviewStatus = parseOptionalString(value, "reviewStatus");
+
+  if (!normalizedReviewStatus) {
+    return undefined;
+  }
+
+  if (TASK_REVIEW_STATUSES.includes(normalizedReviewStatus as TaskReviewStatus)) {
+    return normalizedReviewStatus as TaskReviewStatus;
+  }
+
+  throw new AppError("reviewStatus 查询参数无效。", {
+    statusCode: 400,
+    code: "INVALID_TASK_REVIEW_STATUS",
+    details: {
+      field: "reviewStatus",
+    },
+  });
+}
+
 export const listTasksHandler: RequestHandler = async (req, res) => {
   const authUser = getAuthUser(req);
   const pagination = parsePaginationQuery(req.query);
   const keyword = parseOptionalString(req.query.keyword, "keyword");
   const status = parseOptionalTaskStatus(req.query.status);
+  const reviewStatus = parseOptionalTaskReviewStatus(req.query.reviewStatus);
   const flowMode = parseOptionalTaskFlowMode(req.query.flowMode);
   const taskPage = await listTasksForUser(authUser, {
     ...pagination,
     keyword,
     status,
+    reviewStatus,
     flowMode,
   });
 
