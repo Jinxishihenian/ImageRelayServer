@@ -20,21 +20,21 @@ import {
 } from "../common/http.js";
 import {
   FILE_LABELS,
-  FLOW_MODE_LABELS,
   REVIEW_STAGE_LABELS,
   REVIEW_STATUS_LABELS,
   ROLE_LABELS,
   STATUS_LABELS,
   getAllowedFileAliases,
+  getApprovalStages,
   getNextStatus,
   getReviewActionLabel,
+  getStageReviewRequired,
   getStageByStatus,
   getStageRole,
 } from "../common/role-status.js";
 import { ensureStoredFileExists, moveTempUploadToTask } from "../files/file-storage.js";
 import type {
   AuthenticatedUser,
-  TaskFlowMode,
   TaskFileAlias,
   TaskReviewStatus,
   TaskReviewStage,
@@ -58,7 +58,6 @@ import {
   type TaskRow,
 } from "./tasks.repository.js";
 import {
-  TASK_FLOW_MODES,
   TASK_REVIEW_STATUSES,
   TASK_REVIEW_STAGES,
   TASK_STATUSES,
@@ -121,7 +120,7 @@ function canHandleCurrentStage(task: TaskRow, user: AuthenticatedUser): boolean 
     return false;
   }
 
-  // 手动流转下，待管理员复核期间执行人不可重复提交；驳回后允许原负责人重新提交。
+  // 当前阶段开启审批并进入待审核后，执行人不可重复提交；驳回后允许原负责人重新提交。
   if (task.reviewStatus === "pending_admin_review") {
     return false;
   }
@@ -138,10 +137,22 @@ function canHandleCurrentStage(task: TaskRow, user: AuthenticatedUser): boolean 
   }
 }
 
+function getTaskApprovalFlags(task: TaskRow) {
+  return {
+    needCleanReview: task.needCleanReview,
+    needAnnotateReview: task.needAnnotateReview,
+    needTrainReview: task.needTrainReview,
+  };
+}
+
+function getCurrentStageNeedsReview(task: TaskRow): boolean {
+  return getStageReviewRequired(task.status, getTaskApprovalFlags(task));
+}
+
 function canAdminReviewCurrentStage(task: TaskRow, user: AuthenticatedUser): boolean {
   return (
     user.role === "admin" &&
-    task.flowMode === "manual" &&
+    getCurrentStageNeedsReview(task) &&
     task.reviewStatus === "pending_admin_review" &&
     task.reviewStage !== null
   );
@@ -420,6 +431,8 @@ function mapTaskSummary(task: TaskRow, user: AuthenticatedUser) {
   const reviewActionLabel = getReviewActionLabel(task.reviewStage);
   const isPendingAdminReview = task.reviewStatus === "pending_admin_review";
   const isRejected = task.reviewStatus === "rejected";
+  const approvalStages = getApprovalStages(getTaskApprovalFlags(task));
+  const currentStageNeedsReview = getCurrentStageNeedsReview(task);
   const displayStatusLabel = isPendingAdminReview
     ? "等待管理员复核"
     : isRejected
@@ -432,8 +445,11 @@ function mapTaskSummary(task: TaskRow, user: AuthenticatedUser) {
     description: task.description,
     status: task.status,
     statusLabel: displayStatusLabel,
-    flowMode: task.flowMode,
-    flowModeLabel: FLOW_MODE_LABELS[task.flowMode],
+    needCleanReview: task.needCleanReview,
+    needAnnotateReview: task.needAnnotateReview,
+    needTrainReview: task.needTrainReview,
+    approvalStages,
+    currentStageNeedsReview,
     reviewStatus: task.reviewStatus,
     reviewStatusLabel: REVIEW_STATUS_LABELS[task.reviewStatus],
     reviewStage: task.reviewStage,
@@ -487,23 +503,6 @@ function mapTaskDetail(task: TaskRow, user: AuthenticatedUser) {
       label: stageRole ? ROLE_LABELS[stageRole] : "流程结束",
     },
   };
-}
-
-function parseOptionalTaskFlowMode(value: unknown): TaskFlowMode | undefined {
-  const normalizedMode = parseOptionalString(value, "flowMode");
-
-  if (!normalizedMode) {
-    return undefined;
-  }
-
-  if (TASK_FLOW_MODES.includes(normalizedMode as TaskFlowMode)) {
-    return normalizedMode as TaskFlowMode;
-  }
-
-  throw new AppError("flowMode 查询参数无效。", {
-    statusCode: 400,
-    code: "INVALID_TASK_FLOW_MODE",
-  });
 }
 
 function parseReviewStage(value: unknown): TaskReviewStage {
@@ -702,13 +701,11 @@ export const listTasksHandler: RequestHandler = async (req, res) => {
   const keyword = parseOptionalString(req.query.keyword, "keyword");
   const status = parseOptionalTaskStatus(req.query.status);
   const reviewStatus = parseOptionalTaskReviewStatus(req.query.reviewStatus);
-  const flowMode = parseOptionalTaskFlowMode(req.query.flowMode);
   const taskPage = await listTasksForUser(authUser, {
     ...pagination,
     keyword,
     status,
     reviewStatus,
-    flowMode,
   });
 
   res.json({
@@ -756,10 +753,22 @@ export const getTaskDetailHandler: RequestHandler = async (req, res) => {
 
 export const createTaskHandler: RequestHandler = async (req, res) => {
   const authUser = getAuthUser(req);
-  const { title, description, flowMode, cleanerId, annotatorId, trainerId, sourceFile } = req.body as {
+  const {
+    title,
+    description,
+    needCleanReview,
+    needAnnotateReview,
+    needTrainReview,
+    cleanerId,
+    annotatorId,
+    trainerId,
+    sourceFile,
+  } = req.body as {
     title?: string;
     description?: string;
-    flowMode?: TaskFlowMode;
+    needCleanReview?: boolean;
+    needAnnotateReview?: boolean;
+    needTrainReview?: boolean;
     cleanerId?: number;
     annotatorId?: number;
     trainerId?: number;
@@ -786,7 +795,6 @@ export const createTaskHandler: RequestHandler = async (req, res) => {
 
   await validateTaskAssignees(cleanerUserId, annotatorUserId, trainerUserId);
   const uploadedSourceFile = parseUploadedFile(sourceFile);
-  const nextFlowMode = flowMode && TASK_FLOW_MODES.includes(flowMode) ? flowMode : "auto";
   // 临时上传接口本身不感知业务角色，这里在正式创建任务前做最终格式校验。
   assertArchiveFileName(
     uploadedSourceFile.originalName,
@@ -797,7 +805,9 @@ export const createTaskHandler: RequestHandler = async (req, res) => {
   const taskId = await createTask({
     title: title.trim(),
     description: description?.trim() ?? "",
-    flowMode: nextFlowMode,
+    needCleanReview: Boolean(needCleanReview),
+    needAnnotateReview: Boolean(needAnnotateReview),
+    needTrainReview: Boolean(needTrainReview),
     creatorId: authUser.id,
     cleanerId: cleanerUserId,
     annotatorId: annotatorUserId,
@@ -901,7 +911,7 @@ export const completeTaskStageHandler: RequestHandler = async (req, res) => {
   const nextStatus = getNextStatus(task.status);
   const updated = await completeTaskStage({
     taskId: task.id,
-    flowMode: task.flowMode,
+    requiresReview: getCurrentStageNeedsReview(task),
     reviewStage,
     currentStatus: task.status,
     nextStatus,

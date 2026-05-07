@@ -18,6 +18,9 @@ type ColumnSchemaRow = RowDataPacket & {
 
 const REQUIRED_TASK_COLUMNS = [
   "flow_mode",
+  "need_clean_review",
+  "need_annotate_review",
+  "need_train_review",
   "review_status",
   "review_stage",
   "review_comment",

@@ -1,6 +1,5 @@
 import type {
   TaskFileAlias,
-  TaskFlowMode,
   TaskReviewStage,
   TaskReviewStatus,
   TaskStatus,
@@ -19,11 +18,6 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
   pending_annotate: "待标注",
   pending_train: "待训练",
   finished: "已完成",
-};
-
-export const FLOW_MODE_LABELS: Record<TaskFlowMode, string> = {
-  auto: "自动流转",
-  manual: "手动流转",
 };
 
 export const REVIEW_STATUS_LABELS: Record<TaskReviewStatus, string> = {
@@ -105,4 +99,44 @@ export function getReviewActionLabel(stage: TaskReviewStage | null): string | nu
   }
 
   return `复核${REVIEW_STAGE_LABELS[stage]}`;
+}
+
+export type TaskStageReviewFlags = {
+  needCleanReview: boolean;
+  needAnnotateReview: boolean;
+  needTrainReview: boolean;
+};
+
+export function getStageReviewRequired(
+  status: TaskStatus,
+  flags: TaskStageReviewFlags,
+): boolean {
+  switch (status) {
+    case "pending_clean":
+      return flags.needCleanReview;
+    case "pending_annotate":
+      return flags.needAnnotateReview;
+    case "pending_train":
+      return flags.needTrainReview;
+    case "finished":
+      return false;
+  }
+}
+
+export function getApprovalStages(flags: TaskStageReviewFlags): TaskReviewStage[] {
+  const stages: TaskReviewStage[] = [];
+
+  if (flags.needCleanReview) {
+    stages.push("clean");
+  }
+
+  if (flags.needAnnotateReview) {
+    stages.push("annotate");
+  }
+
+  if (flags.needTrainReview) {
+    stages.push("train");
+  }
+
+  return stages;
 }

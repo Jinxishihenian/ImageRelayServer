@@ -147,6 +147,25 @@ async function main(): Promise<void> {
       alterClauses.push("ADD COLUMN `flow_mode` ENUM('auto', 'manual') NOT NULL DEFAULT 'auto' AFTER `status`");
     }
 
+    if (!existingColumns.has("need_clean_review")) {
+      console.log("检测到缺少列: tasks.need_clean_review");
+      alterClauses.push("ADD COLUMN `need_clean_review` TINYINT(1) NOT NULL DEFAULT 0 AFTER `flow_mode`");
+    }
+
+    if (!existingColumns.has("need_annotate_review")) {
+      console.log("检测到缺少列: tasks.need_annotate_review");
+      alterClauses.push(
+        "ADD COLUMN `need_annotate_review` TINYINT(1) NOT NULL DEFAULT 0 AFTER `need_clean_review`",
+      );
+    }
+
+    if (!existingColumns.has("need_train_review")) {
+      console.log("检测到缺少列: tasks.need_train_review");
+      alterClauses.push(
+        "ADD COLUMN `need_train_review` TINYINT(1) NOT NULL DEFAULT 0 AFTER `need_annotate_review`",
+      );
+    }
+
     if (!existingColumns.has("review_status")) {
       console.log("检测到缺少列: tasks.review_status");
       alterClauses.push(
@@ -181,6 +200,21 @@ async function main(): Promise<void> {
       alterClauses.push("ADD KEY `idx_tasks_flow_mode` (`flow_mode`)");
     }
 
+    if (!existingIndexes.has("idx_tasks_need_clean_review")) {
+      console.log("检测到缺少索引: idx_tasks_need_clean_review");
+      alterClauses.push("ADD KEY `idx_tasks_need_clean_review` (`need_clean_review`)");
+    }
+
+    if (!existingIndexes.has("idx_tasks_need_annotate_review")) {
+      console.log("检测到缺少索引: idx_tasks_need_annotate_review");
+      alterClauses.push("ADD KEY `idx_tasks_need_annotate_review` (`need_annotate_review`)");
+    }
+
+    if (!existingIndexes.has("idx_tasks_need_train_review")) {
+      console.log("检测到缺少索引: idx_tasks_need_train_review");
+      alterClauses.push("ADD KEY `idx_tasks_need_train_review` (`need_train_review`)");
+    }
+
     if (!existingIndexes.has("idx_tasks_review_status")) {
       console.log("检测到缺少索引: idx_tasks_review_status");
       alterClauses.push("ADD KEY `idx_tasks_review_status` (`review_status`)");
@@ -199,18 +233,30 @@ async function main(): Promise<void> {
       );
     }
 
-    if (alterClauses.length === 0) {
-      console.log("tasks 表结构已完整，无需变更。");
-      return;
+    if (alterClauses.length > 0) {
+      const sql = `ALTER TABLE \`tasks\`\n  ${alterClauses.join(",\n  ")};`;
+      console.log("即将执行 SQL:");
+      console.log(sql);
+
+      await connection.query(sql);
+      console.log("tasks 表结构补齐完成。");
+    } else {
+      console.log("tasks 表结构已完整，无需新增字段或索引。");
     }
 
-    const sql = `ALTER TABLE \`tasks\`\n  ${alterClauses.join(",\n  ")};`;
-    console.log("即将执行 SQL:");
-    console.log(sql);
+    // 兼容历史 flow_mode 数据：manual 回填为三阶段全开，auto 回填为三阶段全关。
+    // 使用显式 UPDATE 保证重复执行脚本时依然收敛到一致状态。
+    await connection.query(
+      `
+        UPDATE tasks
+        SET
+          need_clean_review = CASE WHEN flow_mode = 'manual' THEN 1 ELSE 0 END,
+          need_annotate_review = CASE WHEN flow_mode = 'manual' THEN 1 ELSE 0 END,
+          need_train_review = CASE WHEN flow_mode = 'manual' THEN 1 ELSE 0 END
+      `,
+    );
 
-    await connection.query(sql);
-
-    console.log("tasks 表结构补齐完成。");
+    console.log("历史任务审批字段回填完成。");
   } finally {
     await connection.end();
   }

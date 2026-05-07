@@ -5,7 +5,6 @@ export const TASK_STATUSES = [
   "pending_train",
   "finished",
 ] as const;
-export const TASK_FLOW_MODES = ["auto", "manual"] as const;
 export const TASK_REVIEW_STATUSES = [
   "none",
   "pending_admin_review",
@@ -16,7 +15,6 @@ export const TASK_FILE_ALIASES = ["source", "cleaned", "annotated", "model"] as 
 
 export type UserRole = (typeof USER_ROLES)[number];
 export type TaskStatus = (typeof TASK_STATUSES)[number];
-export type TaskFlowMode = (typeof TASK_FLOW_MODES)[number];
 export type TaskReviewStatus = (typeof TASK_REVIEW_STATUSES)[number];
 export type TaskReviewStage = (typeof TASK_REVIEW_STAGES)[number];
 export type TaskFileAlias = (typeof TASK_FILE_ALIASES)[number];

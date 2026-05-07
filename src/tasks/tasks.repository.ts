@@ -2,7 +2,6 @@ import type { ResultSetHeader, RowDataPacket } from "mysql2";
 
 import { execute, query } from "../database/mysql.js";
 import type {
-  TaskFlowMode,
   TaskReviewStage,
   TaskReviewStatus,
   TaskStatus,
@@ -16,7 +15,9 @@ export type TaskRow = {
   title: string;
   description: string;
   status: TaskStatus;
-  flowMode: TaskFlowMode;
+  needCleanReview: boolean;
+  needAnnotateReview: boolean;
+  needTrainReview: boolean;
   reviewStatus: TaskReviewStatus;
   reviewStage: TaskReviewStage | null;
   reviewComment: string | null;
@@ -50,7 +51,9 @@ type TaskQueryRow = RowDataPacket & {
   title: string;
   description: string;
   status: TaskStatus;
-  flow_mode: TaskFlowMode;
+  need_clean_review: number;
+  need_annotate_review: number;
+  need_train_review: number;
   review_status: TaskReviewStatus;
   review_stage: TaskReviewStage | null;
   review_comment: string | null;
@@ -88,7 +91,6 @@ type TaskListFilters = {
   keyword?: string;
   status?: TaskStatus;
   reviewStatus?: TaskReviewStatus;
-  flowMode?: TaskFlowMode;
 };
 
 type ModelListFilters = {
@@ -131,7 +133,9 @@ export type PaginatedModelsResult = {
 type CreateTaskInput = {
   title: string;
   description: string;
-  flowMode: TaskFlowMode;
+  needCleanReview: boolean;
+  needAnnotateReview: boolean;
+  needTrainReview: boolean;
   creatorId: number;
   cleanerId: number;
   annotatorId: number;
@@ -140,7 +144,7 @@ type CreateTaskInput = {
 
 type StageCompletionInput = {
   taskId: number;
-  flowMode: TaskFlowMode;
+  requiresReview: boolean;
   reviewStage: TaskReviewStage;
   currentStatus: TaskStatus;
   nextStatus: TaskStatus;
@@ -174,7 +178,9 @@ function mapTaskRow(row: TaskQueryRow): TaskRow {
     title: row.title,
     description: row.description,
     status: row.status,
-    flowMode: row.flow_mode,
+    needCleanReview: row.need_clean_review === 1,
+    needAnnotateReview: row.need_annotate_review === 1,
+    needTrainReview: row.need_train_review === 1,
     reviewStatus: row.review_status,
     reviewStage: row.review_stage,
     reviewComment: row.review_comment,
@@ -211,7 +217,9 @@ function getBaseTaskSelectSql(): string {
       t.title,
       t.description,
       t.status,
-      t.flow_mode,
+      t.need_clean_review,
+      t.need_annotate_review,
+      t.need_train_review,
       t.review_status,
       t.review_stage,
       t.review_comment,
@@ -274,11 +282,6 @@ function buildTaskListFilter(scope: TaskListScope, filters?: TaskListFilters): {
     params.push(filters.reviewStatus);
   }
 
-  if (filters?.flowMode) {
-    conditions.push("t.flow_mode = ?");
-    params.push(filters.flowMode);
-  }
-
   return {
     whereClause: conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "",
     params,
@@ -295,7 +298,7 @@ function getActionableSummarySql(scope: TaskListScope): {
         sql: `
           SUM(
             CASE
-              WHEN t.flow_mode = 'manual' AND t.review_status = 'pending_admin_review' THEN 1
+              WHEN t.review_status = 'pending_admin_review' THEN 1
               ELSE 0
             END
           ) AS actionable_count
@@ -412,14 +415,12 @@ export async function listTasksForUser(
     keyword?: string;
     status?: TaskStatus;
     reviewStatus?: TaskReviewStatus;
-    flowMode?: TaskFlowMode;
   },
 ): Promise<PaginatedTasksResult> {
   const listFilter = buildTaskListFilter(scope, {
     keyword: input.keyword,
     status: input.status,
     reviewStatus: input.reviewStatus,
-    flowMode: input.flowMode,
   });
   const actionableSummary = getActionableSummarySql(scope);
   const summaryRows = await query<TaskSummaryRow[]>(
@@ -533,16 +534,21 @@ export async function createTask(input: CreateTaskInput): Promise<number> {
         description,
         status,
         flow_mode,
+        need_clean_review,
+        need_annotate_review,
+        need_train_review,
         creator_id,
         cleaner_id,
         annotator_id,
         trainer_id
-      ) VALUES (?, ?, 'pending_clean', ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, 'pending_clean', 'auto', ?, ?, ?, ?, ?, ?, ?)
     `,
     [
       input.title,
       input.description,
-      input.flowMode,
+      input.needCleanReview ? 1 : 0,
+      input.needAnnotateReview ? 1 : 0,
+      input.needTrainReview ? 1 : 0,
       input.creatorId,
       input.cleanerId,
       input.annotatorId,
@@ -573,7 +579,7 @@ export async function attachSourceFile(
 }
 
 export async function completeTaskStage(input: StageCompletionInput): Promise<boolean> {
-  const shouldAutoAdvance = input.flowMode === "auto";
+  const shouldAutoAdvance = !input.requiresReview;
   const finishedAtValue = shouldAutoAdvance && input.nextStatus === "finished" ? new Date() : null;
   const result = await execute(
     `
