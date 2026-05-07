@@ -9,6 +9,7 @@ import { createAuthToken } from "../dist/auth/token.js";
 import { getAllowedFileAliases } from "../dist/common/role-status.js";
 import { loadEnv } from "../dist/config/env.js";
 import { initializeFileStorage } from "../dist/files/file-storage.js";
+import { buildTaskFileDownloadUrl } from "../dist/tasks/tasks.controller.js";
 import {
   buildTaskVisibilitySql,
   canUserAccessTask,
@@ -50,6 +51,17 @@ async function run() {
     )`,
     params: [2, 2],
   });
+  assert.equal(
+    buildTaskFileDownloadUrl("/api/v1/public/task-files/download?taskId=1", ""),
+    "/api/v1/public/task-files/download?taskId=1",
+  );
+  assert.equal(
+    buildTaskFileDownloadUrl(
+      "/api/v1/public/task-files/download?taskId=1",
+      "http://192.168.1.20:3000",
+    ),
+    "http://192.168.1.20:3000/api/v1/public/task-files/download?taskId=1",
+  );
 
   const cleanerUser = {
     id: 2,

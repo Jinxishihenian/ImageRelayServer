@@ -1,3 +1,4 @@
+import { type RowDataPacket } from "mysql2";
 import mysql, { type Pool, type ResultSetHeader } from "mysql2/promise";
 
 import type { AppEnv } from "../config/env.js";
@@ -10,6 +11,19 @@ export type DatabaseHealthStatus = {
 
 let pool: Pool | null = null;
 let lastDatabaseError: string | null = null;
+
+type ColumnSchemaRow = RowDataPacket & {
+  COLUMN_NAME: string;
+};
+
+const REQUIRED_TASK_COLUMNS = [
+  "flow_mode",
+  "review_status",
+  "review_stage",
+  "review_comment",
+  "reviewed_by",
+  "reviewed_at",
+] as const;
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -52,6 +66,7 @@ export async function initializeDatabase(env: AppEnv): Promise<void> {
   try {
     // 启动阶段先做一次轻量查询，避免服务端口先起来、数据库却不可用。
     await pool.query("SELECT 1");
+    await validateTaskSchema(pool, env.dbName);
     lastDatabaseError = null;
   } catch (error) {
     lastDatabaseError = getErrorMessage(error);
@@ -63,6 +78,29 @@ export async function initializeDatabase(env: AppEnv): Promise<void> {
 
     throw new Error(`数据库连接失败: ${lastDatabaseError}`);
   }
+}
+
+async function validateTaskSchema(currentPool: Pool, databaseName: string): Promise<void> {
+  const [rows] = await currentPool.query<ColumnSchemaRow[]>(
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'tasks'
+    `,
+    [databaseName],
+  );
+
+  const existingColumns = new Set(rows.map((row) => row.COLUMN_NAME));
+  const missingColumns = REQUIRED_TASK_COLUMNS.filter((columnName) => !existingColumns.has(columnName));
+
+  if (missingColumns.length === 0) {
+    return;
+  }
+
+  // 启动阶段就明确指出缺失列，避免服务看似启动成功、实际接口运行时才在 SQL 里报 500。
+  throw new Error(
+    `数据库表 tasks 缺少字段: ${missingColumns.join(", ")}。请先执行 pnpm db:upgrade-task-schema 补齐表结构。`,
+  );
 }
 
 export function getDatabasePool(): Pool {

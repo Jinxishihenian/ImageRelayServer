@@ -8,6 +8,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
+    "db:upgrade-task-schema": "tsx src/scripts/upgrade-task-schema.ts",
     "typecheck": "tsc --noEmit",
     "test": "pnpm build && node tests/run-tests.mjs"
   },

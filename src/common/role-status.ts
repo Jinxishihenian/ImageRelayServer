@@ -1,4 +1,11 @@
-import type { TaskFileAlias, TaskStatus, UserRole } from "../types/domain.js";
+import type {
+  TaskFileAlias,
+  TaskFlowMode,
+  TaskReviewStage,
+  TaskReviewStatus,
+  TaskStatus,
+  UserRole,
+} from "../types/domain.js";
 
 export const ROLE_LABELS: Record<UserRole, string> = {
   admin: "管理员",
@@ -12,6 +19,23 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
   pending_annotate: "待标注",
   pending_train: "待训练",
   finished: "已完成",
+};
+
+export const FLOW_MODE_LABELS: Record<TaskFlowMode, string> = {
+  auto: "自动流转",
+  manual: "手动流转",
+};
+
+export const REVIEW_STATUS_LABELS: Record<TaskReviewStatus, string> = {
+  none: "无",
+  pending_admin_review: "等待管理员复核",
+  rejected: "已驳回待重新提交",
+};
+
+export const REVIEW_STAGE_LABELS: Record<TaskReviewStage, string> = {
+  clean: "清洗结果",
+  annotate: "标注结果",
+  train: "训练结果",
 };
 
 export const FILE_LABELS: Record<TaskFileAlias, string> = {
@@ -29,6 +53,19 @@ export function getStageRole(status: TaskStatus): UserRole | null {
       return "annotator";
     case "pending_train":
       return "trainer";
+    case "finished":
+      return null;
+  }
+}
+
+export function getStageByStatus(status: TaskStatus): TaskReviewStage | null {
+  switch (status) {
+    case "pending_clean":
+      return "clean";
+    case "pending_annotate":
+      return "annotate";
+    case "pending_train":
+      return "train";
     case "finished":
       return null;
   }
@@ -60,4 +97,12 @@ export function getAllowedFileAliases(role: UserRole): TaskFileAlias[] {
       // 这里补上 cleaned，避免详情页不返回下载项且下载接口被角色白名单拦截。
       return ["source", "cleaned", "annotated"];
   }
+}
+
+export function getReviewActionLabel(stage: TaskReviewStage | null): string | null {
+  if (!stage) {
+    return null;
+  }
+
+  return `复核${REVIEW_STAGE_LABELS[stage]}`;
 }

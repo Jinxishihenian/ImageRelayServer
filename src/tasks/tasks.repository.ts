@@ -1,7 +1,13 @@
 import type { ResultSetHeader, RowDataPacket } from "mysql2";
 
 import { execute, query } from "../database/mysql.js";
-import type { TaskStatus, UserRole } from "../types/domain.js";
+import type {
+  TaskFlowMode,
+  TaskReviewStage,
+  TaskReviewStatus,
+  TaskStatus,
+  UserRole,
+} from "../types/domain.js";
 import { toIsoString } from "../common/date.js";
 import { buildTaskVisibilitySql } from "./task-visibility.js";
 
@@ -10,6 +16,12 @@ export type TaskRow = {
   title: string;
   description: string;
   status: TaskStatus;
+  flowMode: TaskFlowMode;
+  reviewStatus: TaskReviewStatus;
+  reviewStage: TaskReviewStage | null;
+  reviewComment: string | null;
+  reviewedBy: number | null;
+  reviewedAt: string | null;
   creatorId: number;
   cleanerId: number;
   annotatorId: number;
@@ -38,6 +50,12 @@ type TaskQueryRow = RowDataPacket & {
   title: string;
   description: string;
   status: TaskStatus;
+  flow_mode: TaskFlowMode;
+  review_status: TaskReviewStatus;
+  review_stage: TaskReviewStage | null;
+  review_comment: string | null;
+  reviewed_by: number | null;
+  reviewed_at: Date | string | null;
   creator_id: number;
   cleaner_id: number;
   annotator_id: number;
@@ -69,6 +87,7 @@ type TaskListScope = {
 type TaskListFilters = {
   keyword?: string;
   status?: TaskStatus;
+  flowMode?: TaskFlowMode;
 };
 
 type ModelListFilters = {
@@ -111,6 +130,7 @@ export type PaginatedModelsResult = {
 type CreateTaskInput = {
   title: string;
   description: string;
+  flowMode: TaskFlowMode;
   creatorId: number;
   cleanerId: number;
   annotatorId: number;
@@ -119,6 +139,8 @@ type CreateTaskInput = {
 
 type StageCompletionInput = {
   taskId: number;
+  flowMode: TaskFlowMode;
+  reviewStage: TaskReviewStage;
   currentStatus: TaskStatus;
   nextStatus: TaskStatus;
   fileColumn: "cleaned_file" | "annotated_file" | "model_file";
@@ -129,12 +151,34 @@ type StageCompletionInput = {
   remark: string;
 };
 
+type ReviewApprovalInput = {
+  taskId: number;
+  currentStatus: TaskStatus;
+  nextStatus: TaskStatus;
+  reviewStage: TaskReviewStage;
+  reviewerId: number;
+};
+
+type ReviewRejectionInput = {
+  taskId: number;
+  currentStatus: TaskStatus;
+  reviewStage: TaskReviewStage;
+  reviewerId: number;
+  reviewComment: string;
+};
+
 function mapTaskRow(row: TaskQueryRow): TaskRow {
   return {
     id: row.id,
     title: row.title,
     description: row.description,
     status: row.status,
+    flowMode: row.flow_mode,
+    reviewStatus: row.review_status,
+    reviewStage: row.review_stage,
+    reviewComment: row.review_comment,
+    reviewedBy: row.reviewed_by,
+    reviewedAt: row.reviewed_at ? toIsoString(row.reviewed_at) : null,
     creatorId: row.creator_id,
     cleanerId: row.cleaner_id,
     annotatorId: row.annotator_id,
@@ -166,6 +210,12 @@ function getBaseTaskSelectSql(): string {
       t.title,
       t.description,
       t.status,
+      t.flow_mode,
+      t.review_status,
+      t.review_stage,
+      t.review_comment,
+      t.reviewed_by,
+      t.reviewed_at,
       t.creator_id,
       t.cleaner_id,
       t.annotator_id,
@@ -218,6 +268,11 @@ function buildTaskListFilter(scope: TaskListScope, filters?: TaskListFilters): {
     params.push(filters.status);
   }
 
+  if (filters?.flowMode) {
+    conditions.push("t.flow_mode = ?");
+    params.push(filters.flowMode);
+  }
+
   return {
     whereClause: conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "",
     params,
@@ -231,13 +286,26 @@ function getActionableSummarySql(scope: TaskListScope): {
   switch (scope.role) {
     case "admin":
       return {
-        sql: "0 AS actionable_count",
+        sql: `
+          SUM(
+            CASE
+              WHEN t.flow_mode = 'manual' AND t.review_status = 'pending_admin_review' THEN 1
+              ELSE 0
+            END
+          ) AS actionable_count
+        `,
         params: [],
       };
     case "cleaner":
       return {
         sql: `
-          SUM(CASE WHEN t.status = 'pending_clean' AND t.cleaner_id = ? THEN 1 ELSE 0 END)
+          SUM(
+            CASE
+              WHEN t.status = 'pending_clean' AND t.cleaner_id = ? AND t.review_status <> 'pending_admin_review'
+              THEN 1
+              ELSE 0
+            END
+          )
           AS actionable_count
         `,
         params: [scope.id],
@@ -245,7 +313,13 @@ function getActionableSummarySql(scope: TaskListScope): {
     case "annotator":
       return {
         sql: `
-          SUM(CASE WHEN t.status = 'pending_annotate' AND t.annotator_id = ? THEN 1 ELSE 0 END)
+          SUM(
+            CASE
+              WHEN t.status = 'pending_annotate' AND t.annotator_id = ? AND t.review_status <> 'pending_admin_review'
+              THEN 1
+              ELSE 0
+            END
+          )
           AS actionable_count
         `,
         params: [scope.id],
@@ -253,7 +327,13 @@ function getActionableSummarySql(scope: TaskListScope): {
     case "trainer":
       return {
         sql: `
-          SUM(CASE WHEN t.status = 'pending_train' AND t.trainer_id = ? THEN 1 ELSE 0 END)
+          SUM(
+            CASE
+              WHEN t.status = 'pending_train' AND t.trainer_id = ? AND t.review_status <> 'pending_admin_review'
+              THEN 1
+              ELSE 0
+            END
+          )
           AS actionable_count
         `,
         params: [scope.id],
@@ -325,11 +405,13 @@ export async function listTasksForUser(
     pageSize: number;
     keyword?: string;
     status?: TaskStatus;
+    flowMode?: TaskFlowMode;
   },
 ): Promise<PaginatedTasksResult> {
   const listFilter = buildTaskListFilter(scope, {
     keyword: input.keyword,
     status: input.status,
+    flowMode: input.flowMode,
   });
   const actionableSummary = getActionableSummarySql(scope);
   const summaryRows = await query<TaskSummaryRow[]>(
@@ -442,15 +524,17 @@ export async function createTask(input: CreateTaskInput): Promise<number> {
         title,
         description,
         status,
+        flow_mode,
         creator_id,
         cleaner_id,
         annotator_id,
         trainer_id
-      ) VALUES (?, ?, 'pending_clean', ?, ?, ?, ?)
+      ) VALUES (?, ?, 'pending_clean', ?, ?, ?, ?, ?)
     `,
     [
       input.title,
       input.description,
+      input.flowMode,
       input.creatorId,
       input.cleanerId,
       input.annotatorId,
@@ -481,7 +565,8 @@ export async function attachSourceFile(
 }
 
 export async function completeTaskStage(input: StageCompletionInput): Promise<boolean> {
-  const finishedAtValue = input.nextStatus === "finished" ? new Date() : null;
+  const shouldAutoAdvance = input.flowMode === "auto";
+  const finishedAtValue = shouldAutoAdvance && input.nextStatus === "finished" ? new Date() : null;
   const result = await execute(
     `
       UPDATE tasks
@@ -490,6 +575,11 @@ export async function completeTaskStage(input: StageCompletionInput): Promise<bo
         ${input.fileNameColumn} = ?,
         ${input.remarkColumn} = ?,
         status = ?,
+        review_status = ?,
+        review_stage = ?,
+        review_comment = NULL,
+        reviewed_by = NULL,
+        reviewed_at = NULL,
         finished_at = ?
       WHERE id = ? AND status = ?
     `,
@@ -497,10 +587,73 @@ export async function completeTaskStage(input: StageCompletionInput): Promise<bo
       input.storageKey,
       input.originalName,
       input.remark,
-      input.nextStatus,
+      shouldAutoAdvance ? input.nextStatus : input.currentStatus,
+      shouldAutoAdvance ? "none" : "pending_admin_review",
+      shouldAutoAdvance ? null : input.reviewStage,
       finishedAtValue,
       input.taskId,
       input.currentStatus,
+    ],
+  );
+
+  return result.affectedRows > 0;
+}
+
+export async function approveTaskReview(input: ReviewApprovalInput): Promise<boolean> {
+  const finishedAtValue = input.nextStatus === "finished" ? new Date() : null;
+  const result = await execute(
+    `
+      UPDATE tasks
+      SET
+        status = ?,
+        review_status = 'none',
+        review_stage = NULL,
+        review_comment = NULL,
+        reviewed_by = ?,
+        reviewed_at = NOW(),
+        finished_at = ?
+      WHERE
+        id = ?
+        AND status = ?
+        AND review_status = 'pending_admin_review'
+        AND review_stage = ?
+    `,
+    [
+      input.nextStatus,
+      input.reviewerId,
+      finishedAtValue,
+      input.taskId,
+      input.currentStatus,
+      input.reviewStage,
+    ],
+  );
+
+  return result.affectedRows > 0;
+}
+
+export async function rejectTaskReview(input: ReviewRejectionInput): Promise<boolean> {
+  const result = await execute(
+    `
+      UPDATE tasks
+      SET
+        review_status = 'rejected',
+        review_stage = ?,
+        review_comment = ?,
+        reviewed_by = ?,
+        reviewed_at = NOW()
+      WHERE
+        id = ?
+        AND status = ?
+        AND review_status = 'pending_admin_review'
+        AND review_stage = ?
+    `,
+    [
+      input.reviewStage,
+      input.reviewComment,
+      input.reviewerId,
+      input.taskId,
+      input.currentStatus,
+      input.reviewStage,
     ],
   );
 

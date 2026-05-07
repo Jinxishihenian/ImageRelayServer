@@ -20,16 +20,23 @@ import {
 } from "../common/http.js";
 import {
   FILE_LABELS,
+  FLOW_MODE_LABELS,
+  REVIEW_STAGE_LABELS,
+  REVIEW_STATUS_LABELS,
   ROLE_LABELS,
   STATUS_LABELS,
   getAllowedFileAliases,
   getNextStatus,
+  getReviewActionLabel,
+  getStageByStatus,
   getStageRole,
 } from "../common/role-status.js";
 import { ensureStoredFileExists, moveTempUploadToTask } from "../files/file-storage.js";
 import type {
   AuthenticatedUser,
+  TaskFlowMode,
   TaskFileAlias,
+  TaskReviewStage,
   UploadedFileRef,
   UserRole,
 } from "../types/domain.js";
@@ -38,16 +45,23 @@ import { getAuthUser } from "../auth/auth.middleware.js";
 import { findUsersByIds } from "../users/users.repository.js";
 import {
   attachSourceFile,
+  approveTaskReview,
   completeTaskStage,
   createTask,
   deleteTaskById,
   findTaskById,
   listModels,
   listTasksForUser,
+  rejectTaskReview,
   type ModelListItem,
   type TaskRow,
 } from "./tasks.repository.js";
-import { TASK_STATUSES, type TaskStatus } from "../types/domain.js";
+import {
+  TASK_FLOW_MODES,
+  TASK_REVIEW_STAGES,
+  TASK_STATUSES,
+  type TaskStatus,
+} from "../types/domain.js";
 import { canUserAccessTask } from "./task-visibility.js";
 
 const DOWNLOAD_LINK_ROUTE = "/api/v1/public/task-files/download";
@@ -66,14 +80,17 @@ function createDownloadLinkSignature(
     .digest("base64url");
 }
 
-function buildAbsoluteUrl(req: Parameters<RequestHandler>[0], path: string): string {
-  const baseUrl = req.app.get("fileBaseUrl") as string | undefined;
+export function buildTaskFileDownloadUrl(routePath: string, fileBaseUrl?: string): string {
+  const baseUrl = fileBaseUrl?.trim();
 
-  if (baseUrl?.trim()) {
-    return new URL(path, `${baseUrl.replace(/\/+$/, "")}/`).toString();
+  if (baseUrl) {
+    return new URL(routePath, `${baseUrl.replace(/\/+$/, "")}/`).toString();
   }
 
-  return new URL(path, `${req.protocol}://${req.get("host") ?? "localhost"}`).toString();
+  // 未显式配置对外下载基址时，返回相对地址而不是猜测当前 Host。
+  // 这样可以避免局域网访问、反向代理或本机开发场景下，把 127.0.0.1
+  // 之类仅服务端本机可见的地址错误地下发给客户端。
+  return routePath;
 }
 
 function isTaskFileAlias(value: string): value is TaskFileAlias {
@@ -99,6 +116,39 @@ function canHandleCurrentStage(task: TaskRow, user: AuthenticatedUser): boolean 
   const stageRole = getStageRole(task.status);
 
   if (!stageRole || user.role !== stageRole) {
+    return false;
+  }
+
+  // 手动流转下，待管理员复核期间执行人不可重复提交；驳回后允许原负责人重新提交。
+  if (task.reviewStatus === "pending_admin_review") {
+    return false;
+  }
+
+  switch (stageRole) {
+    case "cleaner":
+      return task.cleanerId === user.id;
+    case "annotator":
+      return task.annotatorId === user.id;
+    case "trainer":
+      return task.trainerId === user.id;
+    case "admin":
+      return false;
+  }
+}
+
+function canAdminReviewCurrentStage(task: TaskRow, user: AuthenticatedUser): boolean {
+  return (
+    user.role === "admin" &&
+    task.flowMode === "manual" &&
+    task.reviewStatus === "pending_admin_review" &&
+    task.reviewStage !== null
+  );
+}
+
+function canResubmitCurrentStage(task: TaskRow, user: AuthenticatedUser): boolean {
+  const stageRole = getStageRole(task.status);
+
+  if (!stageRole || task.reviewStatus !== "rejected" || user.role !== stageRole) {
     return false;
   }
 
@@ -365,12 +415,30 @@ function getMyRole(task: TaskRow, user: AuthenticatedUser): UserRole {
 }
 
 function mapTaskSummary(task: TaskRow, user: AuthenticatedUser) {
+  const reviewActionLabel = getReviewActionLabel(task.reviewStage);
+  const isPendingAdminReview = task.reviewStatus === "pending_admin_review";
+  const isRejected = task.reviewStatus === "rejected";
+  const displayStatusLabel = isPendingAdminReview
+    ? "等待管理员复核"
+    : isRejected
+      ? "已驳回待重新提交"
+      : STATUS_LABELS[task.status];
+
   return {
     id: task.id,
     title: task.title,
     description: task.description,
     status: task.status,
-    statusLabel: STATUS_LABELS[task.status],
+    statusLabel: displayStatusLabel,
+    flowMode: task.flowMode,
+    flowModeLabel: FLOW_MODE_LABELS[task.flowMode],
+    reviewStatus: task.reviewStatus,
+    reviewStatusLabel: REVIEW_STATUS_LABELS[task.reviewStatus],
+    reviewStage: task.reviewStage,
+    reviewStageLabel: task.reviewStage ? REVIEW_STAGE_LABELS[task.reviewStage] : null,
+    reviewActionLabel,
+    reviewComment: task.reviewComment,
+    needsAdminReview: isPendingAdminReview,
     createdAt: task.createdAt,
     finishedAt: task.finishedAt,
     creator: {
@@ -393,6 +461,8 @@ function mapTaskSummary(task: TaskRow, user: AuthenticatedUser) {
     },
     myRole: getMyRole(task, user),
     canHandle: canHandleCurrentStage(task, user),
+    canReview: canAdminReviewCurrentStage(task, user),
+    canResubmit: canResubmitCurrentStage(task, user),
   };
 }
 
@@ -408,11 +478,50 @@ function mapTaskDetail(task: TaskRow, user: AuthenticatedUser) {
     },
     downloads: getDownloadFields(task, user),
     canSubmitCurrentStage: canHandleCurrentStage(task, user),
+    canReviewCurrentStage: canAdminReviewCurrentStage(task, user),
+    canResubmitCurrentStage: canResubmitCurrentStage(task, user),
     currentStage: {
       role: stageRole,
       label: stageRole ? ROLE_LABELS[stageRole] : "流程结束",
     },
   };
+}
+
+function parseOptionalTaskFlowMode(value: unknown): TaskFlowMode | undefined {
+  const normalizedMode = parseOptionalString(value, "flowMode");
+
+  if (!normalizedMode) {
+    return undefined;
+  }
+
+  if (TASK_FLOW_MODES.includes(normalizedMode as TaskFlowMode)) {
+    return normalizedMode as TaskFlowMode;
+  }
+
+  throw new AppError("flowMode 查询参数无效。", {
+    statusCode: 400,
+    code: "INVALID_TASK_FLOW_MODE",
+  });
+}
+
+function parseReviewStage(value: unknown): TaskReviewStage {
+  const normalizedStage = parseOptionalString(value, "reviewStage");
+
+  if (!normalizedStage) {
+    throw new AppError("缺少有效的复核阶段。", {
+      statusCode: 400,
+      code: "INVALID_REVIEW_STAGE",
+    });
+  }
+
+  if (TASK_REVIEW_STAGES.includes(normalizedStage as TaskReviewStage)) {
+    return normalizedStage as TaskReviewStage;
+  }
+
+  throw new AppError("复核阶段无效。", {
+    statusCode: 400,
+    code: "INVALID_REVIEW_STAGE",
+  });
 }
 
 function mapModelListItem(item: ModelListItem) {
@@ -570,10 +679,12 @@ export const listTasksHandler: RequestHandler = async (req, res) => {
   const pagination = parsePaginationQuery(req.query);
   const keyword = parseOptionalString(req.query.keyword, "keyword");
   const status = parseOptionalTaskStatus(req.query.status);
+  const flowMode = parseOptionalTaskFlowMode(req.query.flowMode);
   const taskPage = await listTasksForUser(authUser, {
     ...pagination,
     keyword,
     status,
+    flowMode,
   });
 
   res.json({
@@ -621,9 +732,10 @@ export const getTaskDetailHandler: RequestHandler = async (req, res) => {
 
 export const createTaskHandler: RequestHandler = async (req, res) => {
   const authUser = getAuthUser(req);
-  const { title, description, cleanerId, annotatorId, trainerId, sourceFile } = req.body as {
+  const { title, description, flowMode, cleanerId, annotatorId, trainerId, sourceFile } = req.body as {
     title?: string;
     description?: string;
+    flowMode?: TaskFlowMode;
     cleanerId?: number;
     annotatorId?: number;
     trainerId?: number;
@@ -650,6 +762,7 @@ export const createTaskHandler: RequestHandler = async (req, res) => {
 
   await validateTaskAssignees(cleanerUserId, annotatorUserId, trainerUserId);
   const uploadedSourceFile = parseUploadedFile(sourceFile);
+  const nextFlowMode = flowMode && TASK_FLOW_MODES.includes(flowMode) ? flowMode : "auto";
   // 临时上传接口本身不感知业务角色，这里在正式创建任务前做最终格式校验。
   assertArchiveFileName(
     uploadedSourceFile.originalName,
@@ -660,6 +773,7 @@ export const createTaskHandler: RequestHandler = async (req, res) => {
   const taskId = await createTask({
     title: title.trim(),
     description: description?.trim() ?? "",
+    flowMode: nextFlowMode,
     creatorId: authUser.id,
     cleanerId: cleanerUserId,
     annotatorId: annotatorUserId,
@@ -751,9 +865,20 @@ export const completeTaskStageHandler: RequestHandler = async (req, res) => {
         : "model",
   );
 
+  const reviewStage = getStageByStatus(task.status);
+
+  if (!reviewStage) {
+    throw new AppError("当前任务不处于可提交阶段。", {
+      statusCode: 400,
+      code: "INVALID_REVIEW_STAGE",
+    });
+  }
+
   const nextStatus = getNextStatus(task.status);
   const updated = await completeTaskStage({
     taskId: task.id,
+    flowMode: task.flowMode,
+    reviewStage,
     currentStatus: task.status,
     nextStatus,
     fileColumn:
@@ -783,6 +908,89 @@ export const completeTaskStageHandler: RequestHandler = async (req, res) => {
     throw new AppError("任务状态已变化，请刷新后重试。", {
       statusCode: 409,
       code: "TASK_STATUS_CONFLICT",
+    });
+  }
+
+  const latestTask = await findTaskById(task.id);
+
+  res.json({
+    item: latestTask ? mapTaskDetail(latestTask, authUser) : null,
+  });
+};
+
+export const reviewTaskStageHandler: RequestHandler = async (req, res) => {
+  const authUser = getAuthUser(req);
+  const taskId = parsePositiveInteger(getSingleRouteParam(req.params.taskId, "taskId"), "taskId");
+  const task = await findTaskById(taskId);
+
+  if (!task) {
+    throw new AppError("任务不存在。", {
+      statusCode: 404,
+      code: "TASK_NOT_FOUND",
+    });
+  }
+
+  if (!canAdminReviewCurrentStage(task, authUser)) {
+    throw new AppError("当前任务暂无可复核内容。", {
+      statusCode: 403,
+      code: "INVALID_REVIEW_OPERATOR",
+    });
+  }
+
+  const { action, reviewComment, reviewStage } = req.body as {
+    action?: "approve" | "reject";
+    reviewComment?: string;
+    reviewStage?: TaskReviewStage;
+  };
+  const normalizedReviewStage = parseReviewStage(reviewStage);
+
+  if (normalizedReviewStage !== task.reviewStage) {
+    throw new AppError("当前复核阶段已变化，请刷新后重试。", {
+      statusCode: 409,
+      code: "TASK_REVIEW_CONFLICT",
+    });
+  }
+
+  if (action !== "approve" && action !== "reject") {
+    throw new AppError("复核动作无效。", {
+      statusCode: 400,
+      code: "INVALID_REVIEW_ACTION",
+    });
+  }
+
+  let updated = false;
+
+  if (action === "approve") {
+    updated = await approveTaskReview({
+      taskId: task.id,
+      currentStatus: task.status,
+      nextStatus: getNextStatus(task.status),
+      reviewStage: normalizedReviewStage,
+      reviewerId: authUser.id,
+    });
+  } else {
+    const normalizedComment = reviewComment?.trim() ?? "";
+
+    if (!normalizedComment) {
+      throw new AppError("驳回时必须填写审核意见。", {
+        statusCode: 400,
+        code: "INVALID_REVIEW_COMMENT",
+      });
+    }
+
+    updated = await rejectTaskReview({
+      taskId: task.id,
+      currentStatus: task.status,
+      reviewStage: normalizedReviewStage,
+      reviewerId: authUser.id,
+      reviewComment: normalizedComment,
+    });
+  }
+
+  if (!updated) {
+    throw new AppError("任务复核状态已变化，请刷新后重试。", {
+      statusCode: 409,
+      code: "TASK_REVIEW_CONFLICT",
     });
   }
 
@@ -851,6 +1059,7 @@ export const createTaskFileDownloadLinkHandler: RequestHandler = async (req, res
   const env = req.app.get("envConfig") as {
     downloadLinkSecret: string;
     downloadLinkTtlMs: number;
+    fileBaseUrl?: string;
   };
   const expiresAt = Date.now() + env.downloadLinkTtlMs;
   const signature = createDownloadLinkSignature(
@@ -859,9 +1068,9 @@ export const createTaskFileDownloadLinkHandler: RequestHandler = async (req, res
     expiresAt,
     env.downloadLinkSecret,
   );
-  const url = buildAbsoluteUrl(
-    req,
+  const url = buildTaskFileDownloadUrl(
     `${DOWNLOAD_LINK_ROUTE}?taskId=${taskId}&fileAlias=${alias}&expiresAt=${expiresAt}&signature=${encodeURIComponent(signature)}`,
+    env.fileBaseUrl,
   );
 
   res.json({
