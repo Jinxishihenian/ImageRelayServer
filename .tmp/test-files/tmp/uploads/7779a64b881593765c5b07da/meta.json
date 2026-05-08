@@ -1,0 +1,20 @@
+{
+  "id": "7779a64b881593765c5b07da",
+  "storageKey": "tmp/uploads/7779a64b881593765c5b07da/blob.part",
+  "metadataStorageKey": "tmp/uploads/7779a64b881593765c5b07da/meta.json",
+  "originalName": "smoke-upload.txt",
+  "mimeType": "text/plain",
+  "size": 12,
+  "offset": 12,
+  "purpose": "task_model",
+  "createdBy": 1,
+  "createdAt": "2026-05-08T04:06:01.450Z",
+  "expiresAt": "2026-05-09T04:06:01.450Z",
+  "status": "finalized",
+  "finalizedFile": {
+    "storageKey": "tmp/1778213161471-6397b14ca47a2c33.txt",
+    "originalName": "smoke-upload.txt",
+    "mimeType": "text/plain",
+    "size": 12
+  }
+}
