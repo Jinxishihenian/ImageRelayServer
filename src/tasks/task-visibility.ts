@@ -29,6 +29,7 @@ type TaskVisibilitySql = {
 function buildRoleVisibilitySql(
   userId: number,
   assigneeColumn: string,
+  statusColumn: string,
   status: TaskStatus,
   completedFileColumn: string,
 ): TaskVisibilitySql {
@@ -37,7 +38,7 @@ function buildRoleVisibilitySql(
     // 1. the task is currently waiting for this user's stage, or
     // 2. this user has already submitted their stage output.
     condition: `(
-      (${assigneeColumn} = ? AND status = '${status}')
+      (${assigneeColumn} = ? AND ${statusColumn} = '${status}')
       OR (${assigneeColumn} = ? AND ${completedFileColumn} IS NOT NULL)
     )`,
     params: [userId, userId],
@@ -60,6 +61,7 @@ export function buildTaskVisibilitySql(
       return buildRoleVisibilitySql(
         scope.id,
         `${tableAlias}.cleaner_id`,
+        `${tableAlias}.status`,
         "pending_clean",
         `${tableAlias}.cleaned_file`,
       );
@@ -67,6 +69,7 @@ export function buildTaskVisibilitySql(
       return buildRoleVisibilitySql(
         scope.id,
         `${tableAlias}.annotator_id`,
+        `${tableAlias}.status`,
         "pending_annotate",
         `${tableAlias}.annotated_file`,
       );
@@ -74,6 +77,7 @@ export function buildTaskVisibilitySql(
       return buildRoleVisibilitySql(
         scope.id,
         `${tableAlias}.trainer_id`,
+        `${tableAlias}.status`,
         "pending_train",
         `${tableAlias}.model_file`,
       );

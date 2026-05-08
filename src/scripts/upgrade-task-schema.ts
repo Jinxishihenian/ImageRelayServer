@@ -59,14 +59,15 @@ function getDbConfig(): DbConfig {
 async function getExistingColumns(
   connection: mysql.Connection,
   databaseName: string,
+  tableName = "tasks",
 ): Promise<Set<string>> {
   const [rows] = await connection.query<ColumnRow[]>(
     `
       SELECT COLUMN_NAME
       FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'tasks'
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
     `,
-    [databaseName],
+    [databaseName, tableName],
   );
 
   return new Set(rows.map((row) => row.COLUMN_NAME));
@@ -75,14 +76,15 @@ async function getExistingColumns(
 async function getExistingIndexes(
   connection: mysql.Connection,
   databaseName: string,
+  tableName = "tasks",
 ): Promise<Set<string>> {
   const [rows] = await connection.query<IndexRow[]>(
     `
       SELECT INDEX_NAME
       FROM INFORMATION_SCHEMA.STATISTICS
-      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'tasks'
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
     `,
-    [databaseName],
+    [databaseName, tableName],
   );
 
   return new Set(rows.map((row) => row.INDEX_NAME));
@@ -91,14 +93,15 @@ async function getExistingIndexes(
 async function getExistingForeignKeys(
   connection: mysql.Connection,
   databaseName: string,
+  tableName = "tasks",
 ): Promise<Set<string>> {
   const [rows] = await connection.query<ForeignKeyRow[]>(
     `
       SELECT CONSTRAINT_NAME
       FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
-      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'tasks' AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_TYPE = 'FOREIGN KEY'
     `,
-    [databaseName],
+    [databaseName, tableName],
   );
 
   return new Set(rows.map((row) => row.CONSTRAINT_NAME));
@@ -120,6 +123,30 @@ async function ensureTasksTableExists(connection: mysql.Connection, databaseName
   }
 }
 
+async function ensureModelIterationsTable(connection: mysql.Connection): Promise<void> {
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS \`model_iterations\` (
+      \`id\` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+      \`name\` VARCHAR(128) NOT NULL,
+      \`description\` TEXT NOT NULL,
+      \`base_model_name\` VARCHAR(255) NOT NULL,
+      \`goal\` TEXT NOT NULL,
+      \`status\` ENUM('active', 'archived') NOT NULL DEFAULT 'active',
+      \`creator_id\` INT UNSIGNED NOT NULL,
+      \`current_best_task_id\` INT UNSIGNED DEFAULT NULL,
+      \`latest_task_id\` INT UNSIGNED DEFAULT NULL,
+      \`created_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      \`updated_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (\`id\`),
+      KEY \`idx_model_iterations_status\` (\`status\`),
+      KEY \`idx_model_iterations_creator\` (\`creator_id\`),
+      KEY \`idx_model_iterations_current_best_task\` (\`current_best_task_id\`),
+      KEY \`idx_model_iterations_latest_task\` (\`latest_task_id\`),
+      CONSTRAINT \`fk_model_iterations_creator\` FOREIGN KEY (\`creator_id\`) REFERENCES \`users\` (\`id\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+}
+
 async function main(): Promise<void> {
   const config = getDbConfig();
 
@@ -136,6 +163,7 @@ async function main(): Promise<void> {
 
   try {
     await ensureTasksTableExists(connection, config.database);
+    await ensureModelIterationsTable(connection);
 
     const existingColumns = await getExistingColumns(connection, config.database);
     const existingIndexes = await getExistingIndexes(connection, config.database);
@@ -195,6 +223,11 @@ async function main(): Promise<void> {
       alterClauses.push("ADD COLUMN `reviewed_at` DATETIME DEFAULT NULL AFTER `reviewed_by`");
     }
 
+    if (!existingColumns.has("model_iteration_id")) {
+      console.log("检测到缺少列: tasks.model_iteration_id");
+      alterClauses.push("ADD COLUMN `model_iteration_id` INT UNSIGNED DEFAULT NULL AFTER `id`");
+    }
+
     if (!existingIndexes.has("idx_tasks_flow_mode")) {
       console.log("检测到缺少索引: idx_tasks_flow_mode");
       alterClauses.push("ADD KEY `idx_tasks_flow_mode` (`flow_mode`)");
@@ -225,11 +258,23 @@ async function main(): Promise<void> {
       alterClauses.push("ADD KEY `idx_tasks_reviewed_by` (`reviewed_by`)");
     }
 
+    if (!existingIndexes.has("idx_tasks_model_iteration")) {
+      console.log("检测到缺少索引: idx_tasks_model_iteration");
+      alterClauses.push("ADD KEY `idx_tasks_model_iteration` (`model_iteration_id`)");
+    }
+
     if (!existingForeignKeys.has("fk_tasks_reviewed_by")) {
       console.log("检测到缺少外键: fk_tasks_reviewed_by");
       // 旧库补 reviewed_by 后需要同时补外键，避免后续审核人关联出现脏数据。
       alterClauses.push(
         "ADD CONSTRAINT `fk_tasks_reviewed_by` FOREIGN KEY (`reviewed_by`) REFERENCES `users` (`id`)",
+      );
+    }
+
+    if (existingColumns.has("model_iteration_id") && !existingForeignKeys.has("fk_tasks_model_iteration")) {
+      console.log("检测到缺少外键: fk_tasks_model_iteration");
+      alterClauses.push(
+        "ADD CONSTRAINT `fk_tasks_model_iteration` FOREIGN KEY (`model_iteration_id`) REFERENCES `model_iterations` (`id`)",
       );
     }
 
@@ -257,6 +302,7 @@ async function main(): Promise<void> {
     );
 
     console.log("历史任务审批字段回填完成。");
+    console.log("如 tasks 表中已存在历史数据，请手动回填 model_iteration_id 后再改成 NOT NULL。");
   } finally {
     await connection.end();
   }

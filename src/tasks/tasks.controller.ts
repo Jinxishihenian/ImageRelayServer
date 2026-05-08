@@ -33,6 +33,11 @@ import {
   getStageRole,
 } from "../common/role-status.js";
 import { ensureStoredFileExists, moveTempUploadToTask } from "../files/file-storage.js";
+import {
+  clearModelIterationTaskReferences,
+  findModelIterationById,
+  updateModelIterationLatestTask,
+} from "../model-iterations/model-iterations.repository.js";
 import type {
   AuthenticatedUser,
   TaskFileAlias,
@@ -463,6 +468,11 @@ function mapTaskSummary(task: TaskRow, user: AuthenticatedUser) {
       id: task.creatorId,
       username: task.creatorUsername,
     },
+    modelIteration: {
+      id: task.modelIterationId,
+      name: task.modelIterationName,
+      status: task.modelIterationStatus,
+    },
     assignees: {
       cleaner: {
         id: task.cleanerId,
@@ -532,6 +542,7 @@ function mapModelListItem(item: ModelListItem) {
     modelFileName: item.modelFileName,
     trainerRemark: item.trainerRemark,
     finishedAt: item.finishedAt,
+    modelIteration: item.modelIteration,
     trainer: item.trainer,
     download: {
       alias: "model" as const,
@@ -718,9 +729,14 @@ export const listTasksHandler: RequestHandler = async (req, res) => {
 export const listModelsHandler: RequestHandler = async (req, res) => {
   const pagination = parsePaginationQuery(req.query);
   const keyword = parseOptionalString(req.query.keyword, "keyword");
+  const modelIterationIdRaw = parseOptionalString(req.query.modelIterationId, "modelIterationId");
+  const modelIterationId = modelIterationIdRaw
+    ? parsePositiveInteger(modelIterationIdRaw, "modelIterationId")
+    : undefined;
   const modelPage = await listModels({
     ...pagination,
     keyword,
+    modelIterationId,
   });
 
   res.json({
@@ -762,6 +778,7 @@ export const createTaskHandler: RequestHandler = async (req, res) => {
     cleanerId,
     annotatorId,
     trainerId,
+    modelIterationId,
     sourceFile,
   } = req.body as {
     title?: string;
@@ -772,6 +789,7 @@ export const createTaskHandler: RequestHandler = async (req, res) => {
     cleanerId?: number;
     annotatorId?: number;
     trainerId?: number;
+    modelIterationId?: number;
     sourceFile?: unknown;
   };
 
@@ -785,11 +803,28 @@ export const createTaskHandler: RequestHandler = async (req, res) => {
   const cleanerUserId = Number(cleanerId);
   const annotatorUserId = Number(annotatorId);
   const trainerUserId = Number(trainerId);
+  const normalizedModelIterationId = Number(modelIterationId);
 
-  if (![cleanerUserId, annotatorUserId, trainerUserId].every(Number.isInteger)) {
+  if (![cleanerUserId, annotatorUserId, trainerUserId, normalizedModelIterationId].every(Number.isInteger)) {
     throw new AppError("任务负责人不能为空。", {
       statusCode: 400,
       code: "INVALID_TASK_ASSIGNEES",
+    });
+  }
+
+  const modelIteration = await findModelIterationById(normalizedModelIterationId);
+
+  if (!modelIteration) {
+    throw new AppError("所选模型迭代不存在。", {
+      statusCode: 400,
+      code: "INVALID_MODEL_ITERATION",
+    });
+  }
+
+  if (modelIteration.status !== "active") {
+    throw new AppError("仅进行中的模型迭代可用于创建任务。", {
+      statusCode: 400,
+      code: "INACTIVE_MODEL_ITERATION",
     });
   }
 
@@ -803,6 +838,7 @@ export const createTaskHandler: RequestHandler = async (req, res) => {
   );
 
   const taskId = await createTask({
+    modelIterationId: normalizedModelIterationId,
     title: title.trim(),
     description: description?.trim() ?? "",
     needCleanReview: Boolean(needCleanReview),
@@ -842,6 +878,7 @@ export const deleteTaskHandler: RequestHandler = async (req, res) => {
 
   // 当前需求仅删除数据库中的任务记录，不同步清理任务目录下的历史文件。
   // 这样可以避免误删产物；若后续需要回收文件，再补充显式清理策略。
+  await clearModelIterationTaskReferences(taskId);
   await deleteTaskById(taskId);
 
   res.status(204).send();
@@ -947,6 +984,13 @@ export const completeTaskStageHandler: RequestHandler = async (req, res) => {
 
   const latestTask = await findTaskById(task.id);
 
+  if (latestTask?.status === "finished") {
+    await updateModelIterationLatestTask({
+      modelIterationId: latestTask.modelIterationId,
+      taskId: latestTask.id,
+    });
+  }
+
   res.json({
     item: latestTask ? mapTaskDetail(latestTask, authUser) : null,
   });
@@ -1029,6 +1073,13 @@ export const reviewTaskStageHandler: RequestHandler = async (req, res) => {
   }
 
   const latestTask = await findTaskById(task.id);
+
+  if (latestTask?.status === "finished") {
+    await updateModelIterationLatestTask({
+      modelIterationId: latestTask.modelIterationId,
+      taskId: latestTask.id,
+    });
+  }
 
   res.json({
     item: latestTask ? mapTaskDetail(latestTask, authUser) : null,

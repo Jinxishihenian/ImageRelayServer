@@ -215,11 +215,19 @@ export async function userHasTaskReferences(userId: number): Promise<boolean> {
   const rows = await query<Array<RowDataPacket & { matched: number }>>(
     `
       SELECT 1 AS matched
-      FROM tasks
-      WHERE creator_id = ? OR cleaner_id = ? OR annotator_id = ? OR trainer_id = ?
+      FROM (
+        SELECT 1 AS matched
+        FROM tasks
+        WHERE creator_id = ? OR cleaner_id = ? OR annotator_id = ? OR trainer_id = ?
+        LIMIT 1
+      ) task_refs
+      UNION ALL
+      SELECT 1 AS matched
+      FROM model_iterations
+      WHERE creator_id = ?
       LIMIT 1
     `,
-    [userId, userId, userId, userId],
+    [userId, userId, userId, userId, userId],
   );
 
   return rows.length > 0;

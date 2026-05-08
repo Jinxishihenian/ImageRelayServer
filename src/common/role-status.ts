@@ -1,4 +1,5 @@
 import type {
+  ModelIterationStatus,
   TaskFileAlias,
   TaskReviewStage,
   TaskReviewStatus,
@@ -18,6 +19,11 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
   pending_annotate: "待标注",
   pending_train: "待训练",
   finished: "已完成",
+};
+
+export const MODEL_ITERATION_STATUS_LABELS: Record<ModelIterationStatus, string> = {
+  active: "进行中",
+  archived: "已归档",
 };
 
 export const REVIEW_STATUS_LABELS: Record<TaskReviewStatus, string> = {

@@ -17,6 +17,7 @@ type ColumnSchemaRow = RowDataPacket & {
 };
 
 const REQUIRED_TASK_COLUMNS = [
+  "model_iteration_id",
   "flow_mode",
   "need_clean_review",
   "need_annotate_review",
@@ -26,6 +27,19 @@ const REQUIRED_TASK_COLUMNS = [
   "review_comment",
   "reviewed_by",
   "reviewed_at",
+] as const;
+
+const REQUIRED_MODEL_ITERATION_COLUMNS = [
+  "name",
+  "description",
+  "base_model_name",
+  "goal",
+  "status",
+  "creator_id",
+  "current_best_task_id",
+  "latest_task_id",
+  "created_at",
+  "updated_at",
 ] as const;
 
 function getErrorMessage(error: unknown): string {
@@ -70,6 +84,7 @@ export async function initializeDatabase(env: AppEnv): Promise<void> {
     // 启动阶段先做一次轻量查询，避免服务端口先起来、数据库却不可用。
     await pool.query("SELECT 1");
     await validateTaskSchema(pool, env.dbName);
+    await validateModelIterationSchema(pool, env.dbName);
     lastDatabaseError = null;
   } catch (error) {
     lastDatabaseError = getErrorMessage(error);
@@ -103,6 +118,30 @@ async function validateTaskSchema(currentPool: Pool, databaseName: string): Prom
   // 启动阶段就明确指出缺失列，避免服务看似启动成功、实际接口运行时才在 SQL 里报 500。
   throw new Error(
     `数据库表 tasks 缺少字段: ${missingColumns.join(", ")}。请先执行 pnpm db:upgrade-task-schema 补齐表结构。`,
+  );
+}
+
+async function validateModelIterationSchema(currentPool: Pool, databaseName: string): Promise<void> {
+  const [rows] = await currentPool.query<ColumnSchemaRow[]>(
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'model_iterations'
+    `,
+    [databaseName],
+  );
+
+  const existingColumns = new Set(rows.map((row) => row.COLUMN_NAME));
+  const missingColumns = REQUIRED_MODEL_ITERATION_COLUMNS.filter(
+    (columnName) => !existingColumns.has(columnName),
+  );
+
+  if (missingColumns.length === 0) {
+    return;
+  }
+
+  throw new Error(
+    `数据库表 model_iterations 缺少字段: ${missingColumns.join(", ")}。请先执行最新 SQL 脚本补齐表结构。`,
   );
 }
 

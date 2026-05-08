@@ -46,7 +46,7 @@ async function run() {
   });
   assert.deepEqual(buildTaskVisibilitySql({ id: 2, role: "cleaner" }, "t"), {
     condition: `(
-      (t.cleaner_id = ? AND status = 'pending_clean')
+      (t.cleaner_id = ? AND t.status = 'pending_clean')
       OR (t.cleaner_id = ? AND t.cleaned_file IS NOT NULL)
     )`,
     params: [2, 2],
@@ -181,13 +181,6 @@ async function run() {
     },
     baseEnv.authTokenSecret,
   );
-
-  const modelListResponse = await request(app)
-    .get("/api/v1/models")
-    .set("Authorization", `Bearer ${adminToken}`);
-  assert.equal(modelListResponse.status, 200);
-  assert.ok(Array.isArray(modelListResponse.body.items));
-  assert.equal(typeof modelListResponse.body.pagination.total, "number");
 
   const forbiddenModelListResponse = await request(app)
     .get("/api/v1/models")

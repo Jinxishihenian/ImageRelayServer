@@ -29,6 +29,12 @@ import {
   reviewTaskStageHandler,
 } from "../tasks/tasks.controller.js";
 import {
+  createModelIterationHandler,
+  getModelIterationDetailHandler,
+  listModelIterationsHandler,
+  markCurrentBestModelResultHandler,
+} from "../model-iterations/model-iterations.controller.js";
+import {
   createUserHandler,
   deleteUserHandler,
   listUsersHandler,
@@ -45,6 +51,30 @@ export function createApiRouter(env: AppEnv) {
   apiRouter.post("/users", authRequired, requireRoles("admin"), createUserHandler);
   apiRouter.put("/users/:userId", authRequired, requireRoles("admin"), updateUserHandler);
   apiRouter.delete("/users/:userId", authRequired, requireRoles("admin"), deleteUserHandler);
+  apiRouter.get(
+    "/model-iterations",
+    authRequired,
+    requireRoles("admin"),
+    listModelIterationsHandler,
+  );
+  apiRouter.get(
+    "/model-iterations/:modelIterationId",
+    authRequired,
+    requireRoles("admin"),
+    getModelIterationDetailHandler,
+  );
+  apiRouter.post(
+    "/model-iterations",
+    authRequired,
+    requireRoles("admin"),
+    createModelIterationHandler,
+  );
+  apiRouter.post(
+    "/model-iterations/:modelIterationId/current-best-task",
+    authRequired,
+    requireRoles("admin"),
+    markCurrentBestModelResultHandler,
+  );
   apiRouter.get("/models", authRequired, requireRoles("admin"), listModelsHandler);
   apiRouter.get("/tasks", authRequired, listTasksHandler);
   apiRouter.get("/tasks/:taskId", authRequired, getTaskDetailHandler);

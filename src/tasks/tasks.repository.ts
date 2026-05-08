@@ -2,6 +2,7 @@ import type { ResultSetHeader, RowDataPacket } from "mysql2";
 
 import { execute, query } from "../database/mysql.js";
 import type {
+  ModelIterationStatus,
   TaskReviewStage,
   TaskReviewStatus,
   TaskStatus,
@@ -12,6 +13,9 @@ import { buildTaskVisibilitySql } from "./task-visibility.js";
 
 export type TaskRow = {
   id: number;
+  modelIterationId: number;
+  modelIterationName: string;
+  modelIterationStatus: ModelIterationStatus;
   title: string;
   description: string;
   status: TaskStatus;
@@ -48,6 +52,9 @@ export type TaskRow = {
 
 type TaskQueryRow = RowDataPacket & {
   id: number;
+  model_iteration_id: number;
+  model_iteration_name: string;
+  model_iteration_status: ModelIterationStatus;
   title: string;
   description: string;
   status: TaskStatus;
@@ -95,6 +102,7 @@ type TaskListFilters = {
 
 type ModelListFilters = {
   keyword?: string;
+  modelIterationId?: number;
 };
 
 export type TaskListSummary = {
@@ -117,6 +125,11 @@ export type ModelListItem = {
   modelFileName: string;
   trainerRemark: string | null;
   finishedAt: string;
+  modelIteration: {
+    id: number;
+    name: string;
+    status: ModelIterationStatus;
+  };
   trainer: {
     id: number;
     username: string;
@@ -131,6 +144,7 @@ export type PaginatedModelsResult = {
 };
 
 type CreateTaskInput = {
+  modelIterationId: number;
   title: string;
   description: string;
   needCleanReview: boolean;
@@ -175,6 +189,9 @@ type ReviewRejectionInput = {
 function mapTaskRow(row: TaskQueryRow): TaskRow {
   return {
     id: row.id,
+    modelIterationId: row.model_iteration_id,
+    modelIterationName: row.model_iteration_name,
+    modelIterationStatus: row.model_iteration_status,
     title: row.title,
     description: row.description,
     status: row.status,
@@ -214,6 +231,9 @@ function getBaseTaskSelectSql(): string {
   return `
     SELECT
       t.id,
+      t.model_iteration_id,
+      mi.name AS model_iteration_name,
+      mi.status AS model_iteration_status,
       t.title,
       t.description,
       t.status,
@@ -247,6 +267,7 @@ function getBaseTaskSelectSql(): string {
       annotator.username AS annotator_username,
       trainer.username AS trainer_username
     FROM tasks t
+    INNER JOIN model_iterations mi ON mi.id = t.model_iteration_id
     INNER JOIN users creator ON creator.id = t.creator_id
     INNER JOIN users cleaner ON cleaner.id = t.cleaner_id
     INNER JOIN users annotator ON annotator.id = t.annotator_id
@@ -362,6 +383,9 @@ type ModelListRow = RowDataPacket & {
   model_file_name: string;
   trainer_remark: string | null;
   finished_at: Date | string;
+  model_iteration_id: number;
+  model_iteration_name: string;
+  model_iteration_status: ModelIterationStatus;
   trainer_id: number;
   trainer_username: string;
 };
@@ -387,6 +411,11 @@ function buildModelListFilter(filters?: ModelListFilters): {
     params.push(`%${filters.keyword}%`, `%${filters.keyword}%`);
   }
 
+  if (filters?.modelIterationId) {
+    conditions.push("t.model_iteration_id = ?");
+    params.push(filters.modelIterationId);
+  }
+
   return {
     whereClause: `WHERE ${conditions.join(" AND ")}`,
     params,
@@ -400,6 +429,11 @@ function mapModelListRow(row: ModelListRow): ModelListItem {
     modelFileName: row.model_file_name,
     trainerRemark: row.trainer_remark,
     finishedAt: toIsoString(row.finished_at),
+    modelIteration: {
+      id: row.model_iteration_id,
+      name: row.model_iteration_name,
+      status: row.model_iteration_status,
+    },
     trainer: {
       id: row.trainer_id,
       username: row.trainer_username,
@@ -469,9 +503,11 @@ export async function listModels(input: {
   page: number;
   pageSize: number;
   keyword?: string;
+  modelIterationId?: number;
 }): Promise<PaginatedModelsResult> {
   const listFilter = buildModelListFilter({
     keyword: input.keyword,
+    modelIterationId: input.modelIterationId,
   });
   const summaryRows = await query<ModelSummaryRow[]>(
     `
@@ -493,9 +529,13 @@ export async function listModels(input: {
         t.model_file_name,
         t.trainer_remark,
         t.finished_at,
+        mi.id AS model_iteration_id,
+        mi.name AS model_iteration_name,
+        mi.status AS model_iteration_status,
         trainer.id AS trainer_id,
         trainer.username AS trainer_username
       FROM tasks t
+      INNER JOIN model_iterations mi ON mi.id = t.model_iteration_id
       INNER JOIN users trainer ON trainer.id = t.trainer_id
       ${listFilter.whereClause}
       ORDER BY t.finished_at DESC, t.id DESC
@@ -530,6 +570,7 @@ export async function createTask(input: CreateTaskInput): Promise<number> {
   const result = await execute(
     `
       INSERT INTO tasks (
+        model_iteration_id,
         title,
         description,
         status,
@@ -541,9 +582,10 @@ export async function createTask(input: CreateTaskInput): Promise<number> {
         cleaner_id,
         annotator_id,
         trainer_id
-      ) VALUES (?, ?, 'pending_clean', 'auto', ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, 'pending_clean', 'auto', ?, ?, ?, ?, ?, ?, ?)
     `,
     [
+      input.modelIterationId,
       input.title,
       input.description,
       input.needCleanReview ? 1 : 0,
