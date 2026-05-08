@@ -1,4 +1,5 @@
 import type {
+  DatasetStage,
   ModelIterationStatus,
   TaskFileAlias,
   TaskReviewStage,
@@ -24,6 +25,12 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
 export const MODEL_ITERATION_STATUS_LABELS: Record<ModelIterationStatus, string> = {
   active: "进行中",
   archived: "已归档",
+};
+
+export const DATASET_STAGE_LABELS: Record<DatasetStage, string> = {
+  raw: "原始版本",
+  cleaned: "清洗版本",
+  annotated: "标注版本",
 };
 
 export const REVIEW_STATUS_LABELS: Record<TaskReviewStatus, string> = {

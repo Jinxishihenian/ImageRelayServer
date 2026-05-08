@@ -19,6 +19,7 @@ import {
   parsePositiveInteger,
 } from "../common/http.js";
 import {
+  DATASET_STAGE_LABELS,
   FILE_LABELS,
   REVIEW_STAGE_LABELS,
   REVIEW_STATUS_LABELS,
@@ -32,6 +33,18 @@ import {
   getStageByStatus,
   getStageRole,
 } from "../common/role-status.js";
+import { withTransaction } from "../database/mysql.js";
+import {
+  attachGeneratedDatasetVersion,
+  attachTaskDatasetLinks,
+} from "./tasks.repository.js";
+import {
+  createDataset,
+  createDatasetVersion,
+  findDatasetVersionsByTaskId,
+  updateDatasetCurrentVersion,
+  type DatasetVersionRow,
+} from "../datasets/datasets.repository.js";
 import { ensureStoredFileExists, moveTempUploadToTask } from "../files/file-storage.js";
 import {
   clearModelIterationTaskReferences,
@@ -40,6 +53,7 @@ import {
 } from "../model-iterations/model-iterations.repository.js";
 import type {
   AuthenticatedUser,
+  DatasetStage,
   TaskFileAlias,
   TaskReviewStatus,
   TaskReviewStage,
@@ -73,6 +87,193 @@ import { canUserAccessTask } from "./task-visibility.js";
 const DOWNLOAD_LINK_ROUTE = "/api/v1/public/task-files/download";
 const RANGE_HEADER_PREFIX = "bytes=";
 const DEFAULT_DOWNLOAD_MIME_TYPE = "application/octet-stream";
+
+function buildDatasetVersionLabel(versionNo: number, stage: DatasetStage): string {
+  return `v${versionNo}_${stage}`;
+}
+
+function getTaskDatasetVersionsByStage(versions: DatasetVersionRow[]) {
+  return {
+    raw: versions.find((version) => version.stage === "raw") ?? null,
+    cleaned: versions.find((version) => version.stage === "cleaned") ?? null,
+    annotated: versions.find((version) => version.stage === "annotated") ?? null,
+  };
+}
+
+async function buildTaskDatasetSnapshot(task: TaskRow) {
+  if (!task.datasetId || !task.datasetName) {
+    return null;
+  }
+
+  const versions = await findDatasetVersionsByTaskId(task.id);
+  const versionsByStage = getTaskDatasetVersionsByStage(versions);
+  const currentVersion = versions[versions.length - 1] ?? null;
+
+  return {
+    id: task.datasetId,
+    name: task.datasetName,
+    currentVersion: currentVersion
+      ? {
+          id: currentVersion.id,
+          versionNo: currentVersion.versionNo,
+          stage: currentVersion.stage,
+          stageLabel: currentVersion.stageLabel,
+          label: buildDatasetVersionLabel(currentVersion.versionNo, currentVersion.stage),
+        }
+      : null,
+    versions: versions.map((version) => ({
+      id: version.id,
+      versionNo: version.versionNo,
+      stage: version.stage,
+      stageLabel: version.stageLabel,
+      label: buildDatasetVersionLabel(version.versionNo, version.stage),
+      parentVersionId: version.parentVersionId,
+      parentVersionLabel:
+        version.parentVersionNo && version.parentVersionId
+          ? buildDatasetVersionLabel(
+              version.parentVersionNo,
+              version.stage === "cleaned" ? "raw" : "cleaned",
+            )
+          : null,
+      reviewBased: version.reviewBased,
+      createdBy: version.createdBy,
+      createdAt: version.createdAt,
+      fileName: version.fileName,
+      sourceTaskId: version.sourceTaskId,
+    })),
+    keyVersions: {
+      raw: versionsByStage.raw
+        ? {
+            id: versionsByStage.raw.id,
+            label: buildDatasetVersionLabel(versionsByStage.raw.versionNo, versionsByStage.raw.stage),
+            stage: versionsByStage.raw.stage,
+            stageLabel: versionsByStage.raw.stageLabel,
+            createdAt: versionsByStage.raw.createdAt,
+          }
+        : null,
+      cleaned: versionsByStage.cleaned
+        ? {
+            id: versionsByStage.cleaned.id,
+            label: buildDatasetVersionLabel(
+              versionsByStage.cleaned.versionNo,
+              versionsByStage.cleaned.stage,
+            ),
+            stage: versionsByStage.cleaned.stage,
+            stageLabel: versionsByStage.cleaned.stageLabel,
+            createdAt: versionsByStage.cleaned.createdAt,
+          }
+        : null,
+      annotated: versionsByStage.annotated
+        ? {
+            id: versionsByStage.annotated.id,
+            label: buildDatasetVersionLabel(
+              versionsByStage.annotated.versionNo,
+              versionsByStage.annotated.stage,
+            ),
+            stage: versionsByStage.annotated.stage,
+            stageLabel: versionsByStage.annotated.stageLabel,
+            createdAt: versionsByStage.annotated.createdAt,
+          }
+        : null,
+    },
+  };
+}
+
+async function createRawDatasetForTask(input: {
+  taskId: number;
+  taskTitle: string;
+  taskDescription: string;
+  sourceFile: UploadedFileRef;
+  creatorId: number;
+}) {
+  return withTransaction(async (connection) => {
+    const datasetId = await createDataset(
+      {
+        taskId: input.taskId,
+        name: `${input.taskTitle} 数据集`,
+        description: input.taskDescription,
+        modality: "image",
+        taskType: "task_dataset_phase1",
+        creatorId: input.creatorId,
+      },
+      connection,
+    );
+
+    const rawVersionId = await createDatasetVersion(
+      {
+        datasetId,
+        versionNo: 1,
+        stage: "raw",
+        parentVersionId: null,
+        sourceTaskId: input.taskId,
+        storageKey: input.sourceFile.storageKey,
+        fileName: input.sourceFile.originalName,
+        reviewBased: false,
+        createdBy: input.creatorId,
+      },
+      connection,
+    );
+
+    await updateDatasetCurrentVersion(datasetId, rawVersionId, connection);
+    await attachTaskDatasetLinks(
+      {
+        taskId: input.taskId,
+        datasetId,
+        rawDatasetVersionId: rawVersionId,
+      },
+      connection,
+    );
+  });
+}
+
+async function generateTaskDatasetVersionIfNeeded(input: {
+  task: TaskRow;
+  stage: Extract<DatasetStage, "cleaned" | "annotated">;
+  storageKey: string;
+  fileName: string;
+  reviewBased: boolean;
+  createdBy: number;
+}) {
+  if (!input.task.datasetId) {
+    return;
+  }
+
+  const existingVersions = await findDatasetVersionsByTaskId(input.task.id);
+  const alreadyExists = existingVersions.some((version) => version.stage === input.stage);
+
+  if (alreadyExists) {
+    return;
+  }
+
+  const parentVersion =
+    input.stage === "cleaned"
+      ? existingVersions.find((version) => version.stage === "raw") ?? null
+      : existingVersions.find((version) => version.stage === "cleaned") ?? null;
+
+  if (!parentVersion) {
+    return;
+  }
+
+  const nextVersionNo = existingVersions.length + 1;
+  const versionId = await createDatasetVersion({
+    datasetId: input.task.datasetId,
+    versionNo: nextVersionNo,
+    stage: input.stage,
+    parentVersionId: parentVersion.id,
+    sourceTaskId: input.task.id,
+    storageKey: input.storageKey,
+    fileName: input.fileName,
+    reviewBased: input.reviewBased,
+    createdBy: input.createdBy,
+  });
+
+  await updateDatasetCurrentVersion(input.task.datasetId, versionId);
+  await attachGeneratedDatasetVersion({
+    taskId: input.task.id,
+    stage: input.stage,
+    datasetVersionId: versionId,
+  });
+}
 
 function createDownloadLinkSignature(
   taskId: number,
@@ -473,6 +674,15 @@ function mapTaskSummary(task: TaskRow, user: AuthenticatedUser) {
       name: task.modelIterationName,
       status: task.modelIterationStatus,
     },
+    dataset: task.datasetId && task.datasetName
+      ? {
+          id: task.datasetId,
+          name: task.datasetName,
+          rawVersionId: task.rawDatasetVersionId,
+          cleanedVersionId: task.cleanedDatasetVersionId,
+          annotatedVersionId: task.annotatedDatasetVersionId,
+        }
+      : null,
     assignees: {
       cleaner: {
         id: task.cleanerId,
@@ -494,8 +704,9 @@ function mapTaskSummary(task: TaskRow, user: AuthenticatedUser) {
   };
 }
 
-function mapTaskDetail(task: TaskRow, user: AuthenticatedUser) {
+async function mapTaskDetail(task: TaskRow, user: AuthenticatedUser) {
   const stageRole = getStageRole(task.status);
+  const dataset = await buildTaskDatasetSnapshot(task);
 
   return {
     ...mapTaskSummary(task, user),
@@ -512,6 +723,7 @@ function mapTaskDetail(task: TaskRow, user: AuthenticatedUser) {
       role: stageRole,
       label: stageRole ? ROLE_LABELS[stageRole] : "流程结束",
     },
+    dataset,
   };
 }
 
@@ -764,7 +976,7 @@ export const getTaskDetailHandler: RequestHandler = async (req, res) => {
     });
   }
 
-  res.json(mapTaskDetail(task, authUser));
+  res.json(await mapTaskDetail(task, authUser));
 };
 
 export const createTaskHandler: RequestHandler = async (req, res) => {
@@ -853,6 +1065,13 @@ export const createTaskHandler: RequestHandler = async (req, res) => {
   try {
     const storedSourceFile = await moveTempUploadToTask(uploadedSourceFile, taskId, "source");
     await attachSourceFile(taskId, storedSourceFile.storageKey, storedSourceFile.originalName);
+    await createRawDatasetForTask({
+      taskId,
+      taskTitle: title.trim(),
+      taskDescription: description?.trim() ?? "",
+      sourceFile: storedSourceFile,
+      creatorId: authUser.id,
+    });
   } catch (error) {
     await deleteTaskById(taskId);
     throw error;
@@ -861,7 +1080,7 @@ export const createTaskHandler: RequestHandler = async (req, res) => {
   const createdTask = await findTaskById(taskId);
 
   res.status(201).json({
-    item: createdTask ? mapTaskDetail(createdTask, authUser) : null,
+    item: createdTask ? await mapTaskDetail(createdTask, authUser) : null,
   });
 };
 
@@ -946,6 +1165,12 @@ export const completeTaskStageHandler: RequestHandler = async (req, res) => {
   }
 
   const nextStatus = getNextStatus(task.status);
+  const stageDatasetVersion =
+    authUser.role === "cleaner"
+      ? "cleaned"
+      : authUser.role === "annotator"
+        ? "annotated"
+        : null;
   const updated = await completeTaskStage({
     taskId: task.id,
     requiresReview: getCurrentStageNeedsReview(task),
@@ -982,6 +1207,17 @@ export const completeTaskStageHandler: RequestHandler = async (req, res) => {
     });
   }
 
+  if (!getCurrentStageNeedsReview(task) && stageDatasetVersion) {
+    await generateTaskDatasetVersionIfNeeded({
+      task,
+      stage: stageDatasetVersion,
+      storageKey: storedFile.storageKey,
+      fileName: storedFile.originalName,
+      reviewBased: false,
+      createdBy: authUser.id,
+    });
+  }
+
   const latestTask = await findTaskById(task.id);
 
   if (latestTask?.status === "finished") {
@@ -992,7 +1228,7 @@ export const completeTaskStageHandler: RequestHandler = async (req, res) => {
   }
 
   res.json({
-    item: latestTask ? mapTaskDetail(latestTask, authUser) : null,
+    item: latestTask ? await mapTaskDetail(latestTask, authUser) : null,
   });
 };
 
@@ -1072,6 +1308,33 @@ export const reviewTaskStageHandler: RequestHandler = async (req, res) => {
     });
   }
 
+  if (action === "approve") {
+    const reviewStageToDatasetStage =
+      normalizedReviewStage === "clean"
+        ? "cleaned"
+        : normalizedReviewStage === "annotate"
+          ? "annotated"
+          : null;
+
+    if (reviewStageToDatasetStage) {
+      const storageKey =
+        normalizedReviewStage === "clean" ? task.cleanedFile : task.annotatedFile;
+      const fileName =
+        normalizedReviewStage === "clean" ? task.cleanedFileName : task.annotatedFileName;
+
+      if (storageKey && fileName) {
+        await generateTaskDatasetVersionIfNeeded({
+          task,
+          stage: reviewStageToDatasetStage,
+          storageKey,
+          fileName,
+          reviewBased: true,
+          createdBy: authUser.id,
+        });
+      }
+    }
+  }
+
   const latestTask = await findTaskById(task.id);
 
   if (latestTask?.status === "finished") {
@@ -1082,7 +1345,7 @@ export const reviewTaskStageHandler: RequestHandler = async (req, res) => {
   }
 
   res.json({
-    item: latestTask ? mapTaskDetail(latestTask, authUser) : null,
+    item: latestTask ? await mapTaskDetail(latestTask, authUser) : null,
   });
 };
 

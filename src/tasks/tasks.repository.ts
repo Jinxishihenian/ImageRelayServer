@@ -1,6 +1,8 @@
 import type { ResultSetHeader, RowDataPacket } from "mysql2";
+import type { PoolConnection } from "mysql2/promise";
 
 import { execute, query } from "../database/mysql.js";
+import type { DatasetStage } from "../types/domain.js";
 import type {
   ModelIterationStatus,
   TaskReviewStage,
@@ -16,6 +18,11 @@ export type TaskRow = {
   modelIterationId: number;
   modelIterationName: string;
   modelIterationStatus: ModelIterationStatus;
+  datasetId: number | null;
+  datasetName: string | null;
+  rawDatasetVersionId: number | null;
+  cleanedDatasetVersionId: number | null;
+  annotatedDatasetVersionId: number | null;
   title: string;
   description: string;
   status: TaskStatus;
@@ -55,6 +62,11 @@ type TaskQueryRow = RowDataPacket & {
   model_iteration_id: number;
   model_iteration_name: string;
   model_iteration_status: ModelIterationStatus;
+  dataset_id: number | null;
+  dataset_name: string | null;
+  raw_dataset_version_id: number | null;
+  cleaned_dataset_version_id: number | null;
+  annotated_dataset_version_id: number | null;
   title: string;
   description: string;
   status: TaskStatus;
@@ -136,6 +148,18 @@ export type ModelListItem = {
   };
 };
 
+export type TaskDatasetLinkUpdateInput = {
+  taskId: number;
+  datasetId: number;
+  rawDatasetVersionId: number;
+};
+
+export type TaskGeneratedDatasetVersionInput = {
+  taskId: number;
+  stage: Exclude<DatasetStage, "raw">;
+  datasetVersionId: number;
+};
+
 export type PaginatedModelsResult = {
   items: ModelListItem[];
   page: number;
@@ -154,6 +178,10 @@ type CreateTaskInput = {
   cleanerId: number;
   annotatorId: number;
   trainerId: number;
+};
+
+type Executor = {
+  executeResult: (sql: string, params?: any[]) => Promise<ResultSetHeader>;
 };
 
 type StageCompletionInput = {
@@ -192,6 +220,11 @@ function mapTaskRow(row: TaskQueryRow): TaskRow {
     modelIterationId: row.model_iteration_id,
     modelIterationName: row.model_iteration_name,
     modelIterationStatus: row.model_iteration_status,
+    datasetId: row.dataset_id,
+    datasetName: row.dataset_name,
+    rawDatasetVersionId: row.raw_dataset_version_id,
+    cleanedDatasetVersionId: row.cleaned_dataset_version_id,
+    annotatedDatasetVersionId: row.annotated_dataset_version_id,
     title: row.title,
     description: row.description,
     status: row.status,
@@ -227,6 +260,21 @@ function mapTaskRow(row: TaskQueryRow): TaskRow {
   };
 }
 
+function getExecutor(connection?: PoolConnection): Executor {
+  if (connection) {
+    return {
+      executeResult: async (sql: string, params?: any[]) => {
+        const [result] = await connection.execute<ResultSetHeader>(sql, params ?? []);
+        return result;
+      },
+    };
+  }
+
+  return {
+    executeResult: async (sql: string, params?: any[]) => execute(sql, params ?? []),
+  } satisfies Executor;
+}
+
 function getBaseTaskSelectSql(): string {
   return `
     SELECT
@@ -234,6 +282,11 @@ function getBaseTaskSelectSql(): string {
       t.model_iteration_id,
       mi.name AS model_iteration_name,
       mi.status AS model_iteration_status,
+      t.dataset_id,
+      d.name AS dataset_name,
+      t.raw_dataset_version_id,
+      t.cleaned_dataset_version_id,
+      t.annotated_dataset_version_id,
       t.title,
       t.description,
       t.status,
@@ -268,6 +321,7 @@ function getBaseTaskSelectSql(): string {
       trainer.username AS trainer_username
     FROM tasks t
     INNER JOIN model_iterations mi ON mi.id = t.model_iteration_id
+    LEFT JOIN datasets d ON d.id = t.dataset_id
     INNER JOIN users creator ON creator.id = t.creator_id
     INNER JOIN users cleaner ON cleaner.id = t.cleaner_id
     INNER JOIN users annotator ON annotator.id = t.annotator_id
@@ -566,8 +620,9 @@ export async function findTaskById(taskId: number): Promise<TaskRow | null> {
   return row ? mapTaskRow(row) : null;
 }
 
-export async function createTask(input: CreateTaskInput): Promise<number> {
-  const result = await execute(
+export async function createTask(input: CreateTaskInput, connection?: PoolConnection): Promise<number> {
+  const executor = getExecutor(connection);
+  const result = await executor.executeResult(
     `
       INSERT INTO tasks (
         model_iteration_id,
@@ -601,16 +656,19 @@ export async function createTask(input: CreateTaskInput): Promise<number> {
   return result.insertId;
 }
 
-export async function deleteTaskById(taskId: number): Promise<void> {
-  await execute("DELETE FROM tasks WHERE id = ?", [taskId]);
+export async function deleteTaskById(taskId: number, connection?: PoolConnection): Promise<void> {
+  const executor = getExecutor(connection);
+  await executor.executeResult("DELETE FROM tasks WHERE id = ?", [taskId]);
 }
 
 export async function attachSourceFile(
   taskId: number,
   storageKey: string,
   originalName: string,
+  connection?: PoolConnection,
 ): Promise<void> {
-  await execute(
+  const executor = getExecutor(connection);
+  await executor.executeResult(
     `
       UPDATE tasks
       SET source_file = ?, source_file_name = ?
@@ -620,10 +678,43 @@ export async function attachSourceFile(
   );
 }
 
+export async function attachTaskDatasetLinks(
+  input: TaskDatasetLinkUpdateInput,
+  connection?: PoolConnection,
+): Promise<void> {
+  const executor = getExecutor(connection);
+  await executor.executeResult(
+    `
+      UPDATE tasks
+      SET dataset_id = ?, raw_dataset_version_id = ?
+      WHERE id = ?
+    `,
+    [input.datasetId, input.rawDatasetVersionId, input.taskId],
+  );
+}
+
+export async function attachGeneratedDatasetVersion(
+  input: TaskGeneratedDatasetVersionInput,
+  connection?: PoolConnection,
+): Promise<void> {
+  const column = input.stage === "cleaned" ? "cleaned_dataset_version_id" : "annotated_dataset_version_id";
+  const executor = getExecutor(connection);
+
+  await executor.executeResult(
+    `
+      UPDATE tasks
+      SET ${column} = ?
+      WHERE id = ?
+    `,
+    [input.datasetVersionId, input.taskId],
+  );
+}
+
 export async function completeTaskStage(input: StageCompletionInput): Promise<boolean> {
+  const executor = getExecutor();
   const shouldAutoAdvance = !input.requiresReview;
   const finishedAtValue = shouldAutoAdvance && input.nextStatus === "finished" ? new Date() : null;
-  const result = await execute(
+  const result = await executor.executeResult(
     `
       UPDATE tasks
       SET
@@ -656,8 +747,9 @@ export async function completeTaskStage(input: StageCompletionInput): Promise<bo
 }
 
 export async function approveTaskReview(input: ReviewApprovalInput): Promise<boolean> {
+  const executor = getExecutor();
   const finishedAtValue = input.nextStatus === "finished" ? new Date() : null;
-  const result = await execute(
+  const result = await executor.executeResult(
     `
       UPDATE tasks
       SET
@@ -688,7 +780,8 @@ export async function approveTaskReview(input: ReviewApprovalInput): Promise<boo
 }
 
 export async function rejectTaskReview(input: ReviewRejectionInput): Promise<boolean> {
-  const result = await execute(
+  const executor = getExecutor();
+  const result = await executor.executeResult(
     `
       UPDATE tasks
       SET

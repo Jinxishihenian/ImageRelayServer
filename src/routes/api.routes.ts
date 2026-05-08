@@ -15,6 +15,10 @@ import {
   uploadFileHandler,
 } from "../files/file.controller.js";
 import {
+  getDatasetDetailHandler,
+  listDatasetsHandler,
+} from "../datasets/datasets.controller.js";
+import {
   completeTaskStageHandler,
   createTaskFileDownloadLinkHandler,
   createTaskHandler,
@@ -51,6 +55,8 @@ export function createApiRouter(env: AppEnv) {
   apiRouter.post("/users", authRequired, requireRoles("admin"), createUserHandler);
   apiRouter.put("/users/:userId", authRequired, requireRoles("admin"), updateUserHandler);
   apiRouter.delete("/users/:userId", authRequired, requireRoles("admin"), deleteUserHandler);
+  apiRouter.get("/datasets", authRequired, requireRoles("admin"), listDatasetsHandler);
+  apiRouter.get("/datasets/:datasetId", authRequired, requireRoles("admin"), getDatasetDetailHandler);
   apiRouter.get(
     "/model-iterations",
     authRequired,

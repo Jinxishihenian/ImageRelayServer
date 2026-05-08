@@ -1,5 +1,9 @@
 import { type RowDataPacket } from "mysql2";
-import mysql, { type Pool, type ResultSetHeader } from "mysql2/promise";
+import mysql, {
+  type Pool,
+  type PoolConnection,
+  type ResultSetHeader,
+} from "mysql2/promise";
 
 import type { AppEnv } from "../config/env.js";
 import { AppError } from "../utils/app-error.js";
@@ -18,6 +22,10 @@ type ColumnSchemaRow = RowDataPacket & {
 
 const REQUIRED_TASK_COLUMNS = [
   "model_iteration_id",
+  "dataset_id",
+  "raw_dataset_version_id",
+  "cleaned_dataset_version_id",
+  "annotated_dataset_version_id",
   "flow_mode",
   "need_clean_review",
   "need_annotate_review",
@@ -40,6 +48,31 @@ const REQUIRED_MODEL_ITERATION_COLUMNS = [
   "latest_task_id",
   "created_at",
   "updated_at",
+] as const;
+
+const REQUIRED_DATASET_COLUMNS = [
+  "task_id",
+  "name",
+  "description",
+  "modality",
+  "task_type",
+  "creator_id",
+  "current_version_id",
+  "created_at",
+  "updated_at",
+] as const;
+
+const REQUIRED_DATASET_VERSION_COLUMNS = [
+  "dataset_id",
+  "version_no",
+  "stage",
+  "parent_version_id",
+  "source_task_id",
+  "storage_key",
+  "file_name",
+  "review_based",
+  "created_by",
+  "created_at",
 ] as const;
 
 function getErrorMessage(error: unknown): string {
@@ -85,6 +118,8 @@ export async function initializeDatabase(env: AppEnv): Promise<void> {
     await pool.query("SELECT 1");
     await validateTaskSchema(pool, env.dbName);
     await validateModelIterationSchema(pool, env.dbName);
+    await validateDatasetSchema(pool, env.dbName);
+    await validateDatasetVersionSchema(pool, env.dbName);
     lastDatabaseError = null;
   } catch (error) {
     lastDatabaseError = getErrorMessage(error);
@@ -145,8 +180,74 @@ async function validateModelIterationSchema(currentPool: Pool, databaseName: str
   );
 }
 
+async function validateDatasetSchema(currentPool: Pool, databaseName: string): Promise<void> {
+  const [rows] = await currentPool.query<ColumnSchemaRow[]>(
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'datasets'
+    `,
+    [databaseName],
+  );
+
+  const existingColumns = new Set(rows.map((row) => row.COLUMN_NAME));
+  const missingColumns = REQUIRED_DATASET_COLUMNS.filter(
+    (columnName) => !existingColumns.has(columnName),
+  );
+
+  if (missingColumns.length === 0) {
+    return;
+  }
+
+  throw new Error(
+    `数据库表 datasets 缺少字段: ${missingColumns.join(", ")}。请先执行最新 SQL 脚本补齐表结构。`,
+  );
+}
+
+async function validateDatasetVersionSchema(currentPool: Pool, databaseName: string): Promise<void> {
+  const [rows] = await currentPool.query<ColumnSchemaRow[]>(
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'dataset_versions'
+    `,
+    [databaseName],
+  );
+
+  const existingColumns = new Set(rows.map((row) => row.COLUMN_NAME));
+  const missingColumns = REQUIRED_DATASET_VERSION_COLUMNS.filter(
+    (columnName) => !existingColumns.has(columnName),
+  );
+
+  if (missingColumns.length === 0) {
+    return;
+  }
+
+  throw new Error(
+    `数据库表 dataset_versions 缺少字段: ${missingColumns.join(", ")}。请先执行最新 SQL 脚本补齐表结构。`,
+  );
+}
+
 export function getDatabasePool(): Pool {
   return ensurePool();
+}
+
+export async function withTransaction<T>(
+  handler: (connection: PoolConnection) => Promise<T>,
+): Promise<T> {
+  const connection = await ensurePool().getConnection();
+
+  try {
+    await connection.beginTransaction();
+    const result = await handler(connection);
+    await connection.commit();
+    return result;
+  } catch (error) {
+    await connection.rollback().catch(() => undefined);
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 export async function query<T>(sql: string, params: any[] = []): Promise<T> {
