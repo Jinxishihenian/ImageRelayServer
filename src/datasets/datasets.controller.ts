@@ -1,4 +1,4 @@
-import type { RequestHandler } from "express";
+import type { RequestHandler, Response } from "express";
 
 import {
   buildPaginationMeta,
@@ -12,6 +12,14 @@ import {
   isValidSignedDownloadSignature,
   streamStoredFileDownload,
 } from "../files/download-utils.js";
+import {
+  buildCleanedArchiveDownloadFileName,
+  getFileExtension,
+  isJsonFileName,
+  resolveCleanedManifestSelection,
+  streamSelectedEntriesAsZip,
+  ZIP_EXTENSION,
+} from "../files/archive-utils.js";
 import { ensureStoredFileExists } from "../files/file-storage.js";
 import { AppError } from "../utils/app-error.js";
 import {
@@ -31,6 +39,86 @@ function getSingleRouteParam(value: string | string[] | undefined, fieldName: st
     statusCode: 400,
     code: "INVALID_ROUTE_PARAM",
   });
+}
+
+function buildAttachmentDisposition(fileName: string): string {
+  return `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`;
+}
+
+async function resolveManifestBackedDatasetVersion(version: NonNullable<Awaited<ReturnType<typeof findDatasetVersionForDownload>>>): Promise<{
+  sourceArchivePath: string;
+  selectedPaths: string[];
+  downloadFileName: string;
+}> {
+  if (version.stage !== "cleaned" || !isJsonFileName(version.fileName)) {
+    throw new AppError("当前数据集版本不需要动态生成压缩包。", {
+      statusCode: 400,
+      code: "INVALID_DATASET_VERSION_DOWNLOAD_MODE",
+    });
+  }
+
+  if (!version.sourceArchiveStorageKey || !version.sourceArchiveFileName) {
+    throw new AppError("当前清洗版本缺少关联的初始文件，无法生成下载包。", {
+      statusCode: 400,
+      code: "DATASET_SOURCE_FILE_MISSING",
+    });
+  }
+
+  if (getFileExtension(version.sourceArchiveFileName) !== ZIP_EXTENSION) {
+    throw new AppError("当前清洗版本依赖的初始文件不是 zip，暂不支持动态导出。", {
+      statusCode: 400,
+      code: "UNSUPPORTED_SOURCE_ARCHIVE_TYPE",
+    });
+  }
+
+  const manifestPath = await ensureStoredFileExists(version.storageKey);
+  const sourceArchivePath = await ensureStoredFileExists(version.sourceArchiveStorageKey);
+  const selection = await resolveCleanedManifestSelection({
+    manifestSource: manifestPath,
+    sourceArchivePath,
+    manifestLabel: "清洗版本结果",
+    sourceArchiveLabel: "初始文件",
+  });
+
+  return {
+    sourceArchivePath,
+    selectedPaths: selection.selectedPaths,
+    downloadFileName: buildCleanedArchiveDownloadFileName(version.sourceArchiveFileName),
+  };
+}
+
+async function streamDatasetVersionDownload(
+  req: Parameters<RequestHandler>[0],
+  res: Response,
+  version: NonNullable<Awaited<ReturnType<typeof findDatasetVersionForDownload>>>,
+): Promise<void> {
+  if (version.stage === "cleaned" && isJsonFileName(version.fileName)) {
+    if (req.headers.range) {
+      throw new AppError("动态生成的清洗版本暂不支持断点续传下载。", {
+        statusCode: 416,
+        code: "UNSUPPORTED_DYNAMIC_RANGE_DOWNLOAD",
+      });
+    }
+
+    const manifestBackedVersion = await resolveManifestBackedDatasetVersion(version);
+
+    res.status(200);
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", buildAttachmentDisposition(manifestBackedVersion.downloadFileName));
+    res.setHeader("Cache-Control", "private, no-store");
+
+    await streamSelectedEntriesAsZip({
+      sourceArchivePath: manifestBackedVersion.sourceArchivePath,
+      selectedPaths: manifestBackedVersion.selectedPaths,
+      sourceArchiveLabel: "初始文件",
+      target: res,
+    });
+    res.end();
+    return;
+  }
+
+  const absolutePath = await ensureStoredFileExists(version.storageKey);
+  await streamStoredFileDownload(req, res, absolutePath, version.fileName);
 }
 
 export const listDatasetsHandler: RequestHandler = async (req, res) => {
@@ -81,9 +169,7 @@ export const downloadDatasetVersionFileHandler: RequestHandler = async (req, res
       code: "DATASET_VERSION_NOT_FOUND",
     });
   }
-
-  const absolutePath = await ensureStoredFileExists(version.storageKey);
-  await streamStoredFileDownload(req, res, absolutePath, version.fileName);
+  await streamDatasetVersionDownload(req, res, version);
 };
 
 export const createDatasetVersionDownloadLinkHandler: RequestHandler = async (req, res) => {
@@ -190,7 +276,5 @@ export const publicDownloadDatasetVersionFileHandler: RequestHandler = async (re
       code: "DATASET_VERSION_NOT_FOUND",
     });
   }
-
-  const absolutePath = await ensureStoredFileExists(version.storageKey);
-  await streamStoredFileDownload(req, res, absolutePath, version.fileName);
+  await streamDatasetVersionDownload(req, res, version);
 };

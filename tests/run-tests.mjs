@@ -8,6 +8,10 @@ import { createApp } from "../dist/app/create-app.js";
 import { createAuthToken } from "../dist/auth/token.js";
 import { getAllowedFileAliases } from "../dist/common/role-status.js";
 import { loadEnv } from "../dist/config/env.js";
+import {
+  parseCleanedManifest,
+  validateUploadContent,
+} from "../dist/files/archive-utils.js";
 import { initializeFileStorage } from "../dist/files/file-storage.js";
 import { buildTaskFileDownloadUrl } from "../dist/tasks/tasks.controller.js";
 import {
@@ -62,6 +66,40 @@ async function run() {
     ),
     "http://192.168.1.20:3000/api/v1/public/task-files/download?taskId=1",
   );
+  assert.deepEqual(
+    await parseCleanedManifest(Buffer.from('["a.png","dir\\\\b.png"]', "utf8")),
+    ["a.png", "dir/b.png"],
+  );
+  await validateUploadContent(
+    Buffer.from('["keep/a.png","keep/b.png"]', "utf8"),
+    "cleaned.json",
+    "task_cleaned",
+  );
+  await assert.rejects(
+    () => validateUploadContent(Buffer.from('{"a":"b"}', "utf8"), "cleaned.json", "task_cleaned"),
+    /字符串数组/,
+  );
+  await assert.rejects(
+    () => validateUploadContent(Buffer.from('["a.png","a.png"]', "utf8"), "cleaned.json", "task_cleaned"),
+    /重复路径/,
+  );
+  await assert.rejects(
+    () => validateUploadContent(Buffer.from('["../a.png"]', "utf8"), "cleaned.json", "task_cleaned"),
+    /不能包含 \. 或 \.\./,
+  );
+
+  const nestedSourceZipBase64 = "UEsDBBQAAAAIAMpyqVxxR47VPwAAAEQAAAAJAAAAZGlyXGEucG5n6wzwc+flkuJiYGDg9fRwCQLSjCDMwQIkt8rwMAEpbk8Xx5CKW8l//sszMDMzMbyf9fI8UJjB09XPZZ1TQhMAUEsBAhQAFAAAAAgAynKpXHFHjtU/AAAARAAAAAkAAAAAAAAAAAAAAAAAAAAAAGRpclxhLnBuZ1BLBQYAAAAAAQABADcAAABmAAAAAAA=";
+  await fs.mkdir(baseEnv.fileStorageDir, { recursive: true });
+  const nestedSourceZipPath = path.join(baseEnv.fileStorageDir, "manifest-fallback-source.zip");
+  await fs.writeFile(nestedSourceZipPath, Buffer.from(nestedSourceZipBase64, "base64"));
+  const { resolveCleanedManifestSelection } = await import("../dist/files/archive-utils.js");
+  const fallbackSelection = await resolveCleanedManifestSelection({
+    manifestSource: Buffer.from('["a.png"]', "utf8"),
+    sourceArchivePath: nestedSourceZipPath,
+    manifestLabel: "清洗结果文件",
+    sourceArchiveLabel: "初始文件",
+  });
+  assert.deepEqual(fallbackSelection.selectedPaths, ["dir/a.png"]);
 
   const cleanerUser = {
     id: 2,

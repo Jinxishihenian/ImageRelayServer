@@ -60,8 +60,12 @@ export type DatasetDetailRow = DatasetSummaryRow & {
 export type DatasetVersionDownloadRow = {
   id: number;
   datasetId: number;
+  stage: DatasetStage;
+  sourceTaskId: number;
   storageKey: string;
   fileName: string;
+  sourceArchiveStorageKey: string | null;
+  sourceArchiveFileName: string | null;
 };
 
 type DatasetListQueryRow = RowDataPacket & {
@@ -101,6 +105,8 @@ type DatasetVersionQueryRow = RowDataPacket & {
   created_by: number;
   created_by_username: string;
   created_at: Date | string;
+  source_file: string | null;
+  source_file_name: string | null;
 };
 
 type CountRow = RowDataPacket & {
@@ -500,10 +506,13 @@ export async function findDatasetVersionForDownload(
         dv.review_based,
         dv.created_by,
         creator.username AS created_by_username,
-        dv.created_at
+        dv.created_at,
+        source_task.source_file,
+        source_task.source_file_name
       FROM dataset_versions dv
       LEFT JOIN dataset_versions parent ON parent.id = dv.parent_version_id
       INNER JOIN users creator ON creator.id = dv.created_by
+      LEFT JOIN tasks source_task ON source_task.id = dv.source_task_id
       WHERE dv.dataset_id = ? AND dv.id = ?
       LIMIT 1
     `,
@@ -519,8 +528,12 @@ export async function findDatasetVersionForDownload(
   return {
     id: row.id,
     datasetId: row.dataset_id,
+    stage: row.stage,
+    sourceTaskId: row.source_task_id,
     storageKey: row.storage_key,
     fileName: row.file_name,
+    sourceArchiveStorageKey: row.source_file,
+    sourceArchiveFileName: row.source_file_name,
   };
 }
 
