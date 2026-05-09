@@ -32,6 +32,8 @@ export type DatasetVersionRow = {
 export type DatasetSummaryRow = {
   id: number;
   taskId: number;
+  projectId: number | null;
+  projectName: string | null;
   name: string;
   description: string;
   modality: string;
@@ -43,6 +45,8 @@ export type DatasetSummaryRow = {
   currentVersionId: number | null;
   currentVersionLabel: string | null;
   currentVersionNo: number | null;
+  currentVersionStage: DatasetStage | null;
+  currentVersionStageLabel: string | null;
   versionCount: number;
   createdAt: string;
   updatedAt: string;
@@ -56,6 +60,8 @@ export type DatasetDetailRow = DatasetSummaryRow & {
 type DatasetListQueryRow = RowDataPacket & {
   id: number;
   task_id: number;
+  model_iteration_id: number | null;
+  model_iteration_name: string | null;
   name: string;
   description: string;
   modality: string;
@@ -143,10 +149,22 @@ function buildVersionLabel(versionNo: number | null, stage: DatasetStage | null)
   return `v${versionNo}_${stage}`;
 }
 
+function buildVersionNoLabel(versionNo: number | null): string | null {
+  if (!versionNo) {
+    return null;
+  }
+
+  return `v${versionNo}`;
+}
+
 function mapDatasetSummaryRow(row: DatasetListQueryRow): DatasetSummaryRow {
+  const currentVersionLabel = buildVersionLabel(row.current_version_no, row.current_version_stage);
+
   return {
     id: row.id,
     taskId: row.task_id,
+    projectId: row.model_iteration_id,
+    projectName: row.model_iteration_name,
     name: row.name,
     description: row.description,
     modality: row.modality,
@@ -156,8 +174,12 @@ function mapDatasetSummaryRow(row: DatasetListQueryRow): DatasetSummaryRow {
       username: row.creator_username,
     },
     currentVersionId: row.current_version_id,
-    currentVersionLabel: buildVersionLabel(row.current_version_no, row.current_version_stage),
+    currentVersionLabel,
     currentVersionNo: row.current_version_no,
+    currentVersionStage: row.current_version_stage,
+    currentVersionStageLabel: row.current_version_stage
+      ? DATASET_STAGE_LABELS[row.current_version_stage]
+      : null,
     versionCount: Number(row.version_count ?? 0),
     createdAt: toIsoString(row.created_at),
     updatedAt: toIsoString(row.updated_at),
@@ -301,6 +323,8 @@ export async function listDatasets(input: {
       SELECT
         d.id,
         d.task_id,
+        t.model_iteration_id,
+        mi.name AS model_iteration_name,
         d.name,
         d.description,
         d.modality,
@@ -314,6 +338,8 @@ export async function listDatasets(input: {
         d.created_at,
         d.updated_at
       FROM datasets d
+      INNER JOIN tasks t ON t.id = d.task_id
+      LEFT JOIN model_iterations mi ON mi.id = t.model_iteration_id
       INNER JOIN users creator ON creator.id = d.creator_id
       LEFT JOIN dataset_versions current_version ON current_version.id = d.current_version_id
       LEFT JOIN dataset_versions dv ON dv.dataset_id = d.id
@@ -339,6 +365,8 @@ export async function findDatasetById(datasetId: number): Promise<DatasetDetailR
       SELECT
         d.id,
         d.task_id,
+        t.model_iteration_id,
+        mi.name AS model_iteration_name,
         t.title AS task_title,
         d.name,
         d.description,
@@ -354,6 +382,7 @@ export async function findDatasetById(datasetId: number): Promise<DatasetDetailR
         d.updated_at
       FROM datasets d
       INNER JOIN tasks t ON t.id = d.task_id
+      LEFT JOIN model_iterations mi ON mi.id = t.model_iteration_id
       INNER JOIN users creator ON creator.id = d.creator_id
       LEFT JOIN dataset_versions current_version ON current_version.id = d.current_version_id
       LEFT JOIN (
@@ -398,8 +427,18 @@ export async function findDatasetById(datasetId: number): Promise<DatasetDetailR
     [datasetId],
   );
 
+  const mappedSummary = mapDatasetSummaryRow(row);
+  const latestVersion = versions[0] ? mapDatasetVersionRow(versions[0]) : null;
+
   return {
-    ...mapDatasetSummaryRow(row),
+    ...mappedSummary,
+    currentVersionId: mappedSummary.currentVersionId ?? latestVersion?.id ?? null,
+    currentVersionLabel:
+      mappedSummary.currentVersionLabel ?? buildVersionNoLabel(latestVersion?.versionNo ?? null),
+    currentVersionNo: mappedSummary.currentVersionNo ?? latestVersion?.versionNo ?? null,
+    currentVersionStage: mappedSummary.currentVersionStage ?? latestVersion?.stage ?? null,
+    currentVersionStageLabel:
+      mappedSummary.currentVersionStageLabel ?? latestVersion?.stageLabel ?? null,
     taskTitle: row.task_title,
     versions: versions.map(mapDatasetVersionRow),
   };
@@ -433,4 +472,42 @@ export async function findDatasetVersionsByTaskId(taskId: number): Promise<Datas
   );
 
   return rows.map(mapDatasetVersionRow);
+}
+
+export async function listDatasetsByModelIteration(
+  modelIterationId: number,
+): Promise<DatasetSummaryRow[]> {
+  const rows = await query<DatasetListQueryRow[]>(
+    `
+      SELECT
+        d.id,
+        d.task_id,
+        t.model_iteration_id,
+        mi.name AS model_iteration_name,
+        d.name,
+        d.description,
+        d.modality,
+        d.task_type,
+        d.creator_id,
+        creator.username AS creator_username,
+        d.current_version_id,
+        current_version.version_no AS current_version_no,
+        current_version.stage AS current_version_stage,
+        COUNT(dv.id) AS version_count,
+        d.created_at,
+        d.updated_at
+      FROM datasets d
+      INNER JOIN tasks t ON t.id = d.task_id
+      INNER JOIN model_iterations mi ON mi.id = t.model_iteration_id
+      INNER JOIN users creator ON creator.id = d.creator_id
+      LEFT JOIN dataset_versions current_version ON current_version.id = d.current_version_id
+      LEFT JOIN dataset_versions dv ON dv.dataset_id = d.id
+      WHERE t.model_iteration_id = ?
+      GROUP BY d.id
+      ORDER BY d.created_at DESC, d.id DESC
+    `,
+    [modelIterationId],
+  );
+
+  return rows.map(mapDatasetSummaryRow);
 }

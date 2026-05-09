@@ -9,6 +9,7 @@ import {
   parsePaginationQuery,
   parsePositiveInteger,
 } from "../common/http.js";
+import { listDatasetsByModelIteration } from "../datasets/datasets.repository.js";
 import { AppError } from "../utils/app-error.js";
 import {
   createModelIteration,
@@ -52,9 +53,10 @@ function mapModelIterationResultItem(item: ModelIterationResultItem) {
 }
 
 async function buildModelIterationDetail(modelIteration: ModelIterationRow) {
-  const [tasks, results] = await Promise.all([
+  const [tasks, results, datasets] = await Promise.all([
     listTasksByModelIteration(modelIteration.id),
     listModelResultsByModelIteration(modelIteration.id),
+    listDatasetsByModelIteration(modelIteration.id),
   ]);
 
   const latestModelResult = modelIteration.latestTaskId
@@ -82,6 +84,7 @@ async function buildModelIterationDetail(modelIteration: ModelIterationRow) {
     updatedAt: modelIteration.updatedAt,
     tasks,
     results: results.map(mapModelIterationResultItem),
+    datasets,
     latestModelResult: latestModelResult ? mapModelIterationResultItem(latestModelResult) : null,
     currentBestResult: currentBestResult ? mapModelIterationResultItem(currentBestResult) : null,
   };
