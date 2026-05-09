@@ -15,8 +15,11 @@ import {
   uploadFileHandler,
 } from "../files/file.controller.js";
 import {
+  createDatasetVersionDownloadLinkHandler,
+  downloadDatasetVersionFileHandler,
   getDatasetDetailHandler,
   listDatasetsHandler,
+  publicDownloadDatasetVersionFileHandler,
 } from "../datasets/datasets.controller.js";
 import {
   completeTaskStageHandler,
@@ -57,6 +60,18 @@ export function createApiRouter(env: AppEnv) {
   apiRouter.delete("/users/:userId", authRequired, requireRoles("admin"), deleteUserHandler);
   apiRouter.get("/datasets", authRequired, requireRoles("admin"), listDatasetsHandler);
   apiRouter.get("/datasets/:datasetId", authRequired, requireRoles("admin"), getDatasetDetailHandler);
+  apiRouter.get(
+    "/datasets/:datasetId/versions/:versionId/download",
+    authRequired,
+    requireRoles("admin"),
+    downloadDatasetVersionFileHandler,
+  );
+  apiRouter.get(
+    "/datasets/:datasetId/versions/:versionId/download-link",
+    authRequired,
+    requireRoles("admin"),
+    createDatasetVersionDownloadLinkHandler,
+  );
   apiRouter.get(
     "/model-iterations",
     authRequired,
@@ -101,6 +116,7 @@ export function createApiRouter(env: AppEnv) {
     previewTaskFileImageHandler,
   );
   apiRouter.get("/public/task-files/download", publicDownloadTaskFileHandler);
+  apiRouter.get("/public/dataset-versions/download", publicDownloadDatasetVersionFileHandler);
   apiRouter.post("/files/uploads", authRequired, createUploadSessionHandler);
   apiRouter.post("/files/uploads/:uploadId/complete", authRequired, completeUploadSessionHandler);
   apiRouter.options("/files/tus", authRequired, tusOptionsHandler);

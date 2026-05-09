@@ -57,6 +57,13 @@ export type DatasetDetailRow = DatasetSummaryRow & {
   versions: DatasetVersionRow[];
 };
 
+export type DatasetVersionDownloadRow = {
+  id: number;
+  datasetId: number;
+  storageKey: string;
+  fileName: string;
+};
+
 type DatasetListQueryRow = RowDataPacket & {
   id: number;
   task_id: number;
@@ -472,6 +479,49 @@ export async function findDatasetVersionsByTaskId(taskId: number): Promise<Datas
   );
 
   return rows.map(mapDatasetVersionRow);
+}
+
+export async function findDatasetVersionForDownload(
+  datasetId: number,
+  versionId: number,
+): Promise<DatasetVersionDownloadRow | null> {
+  const rows = await query<DatasetVersionQueryRow[]>(
+    `
+      SELECT
+        dv.id,
+        dv.dataset_id,
+        dv.version_no,
+        dv.stage,
+        dv.parent_version_id,
+        parent.version_no AS parent_version_no,
+        dv.source_task_id,
+        dv.storage_key,
+        dv.file_name,
+        dv.review_based,
+        dv.created_by,
+        creator.username AS created_by_username,
+        dv.created_at
+      FROM dataset_versions dv
+      LEFT JOIN dataset_versions parent ON parent.id = dv.parent_version_id
+      INNER JOIN users creator ON creator.id = dv.created_by
+      WHERE dv.dataset_id = ? AND dv.id = ?
+      LIMIT 1
+    `,
+    [datasetId, versionId],
+  );
+
+  const row = rows[0];
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    datasetId: row.dataset_id,
+    storageKey: row.storage_key,
+    fileName: row.file_name,
+  };
 }
 
 export async function listDatasetsByModelIteration(
