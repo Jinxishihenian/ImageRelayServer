@@ -13,7 +13,10 @@ import {
   validateUploadContent,
 } from "../dist/files/archive-utils.js";
 import { initializeFileStorage } from "../dist/files/file-storage.js";
-import { buildTaskFileDownloadUrl } from "../dist/tasks/tasks.controller.js";
+import {
+  buildTaskFileDownloadUrl,
+  getAccessibleTaskFileAliases,
+} from "../dist/tasks/tasks.controller.js";
 import {
   buildTaskVisibilitySql,
   canUserAccessTask,
@@ -191,6 +194,35 @@ async function run() {
       trainerUser,
     ),
     true,
+  );
+  const finishedTaskForAllStages = {
+    id: 2,
+    status: "finished",
+    reviewStatus: "none",
+    reviewStage: null,
+    cleanerId: 2,
+    annotatorId: 3,
+    trainerId: 4,
+    sourceFile: "tasks/task-2/source.zip",
+    sourceFileName: "source.zip",
+    cleanedFile: "tasks/task-2/cleaned.zip",
+    cleanedFileName: "cleaned.zip",
+    annotatedFile: "tasks/task-2/annotated.zip",
+    annotatedFileName: "annotated.zip",
+    modelFile: "tasks/task-2/model.bin",
+    modelFileName: "model.bin",
+  };
+  assert.deepEqual(
+    getAccessibleTaskFileAliases(finishedTaskForAllStages, cleanerUser),
+    ["source", "cleaned"],
+  );
+  assert.deepEqual(
+    getAccessibleTaskFileAliases(finishedTaskForAllStages, annotatorUser),
+    ["cleaned", "annotated"],
+  );
+  assert.deepEqual(
+    getAccessibleTaskFileAliases(finishedTaskForAllStages, trainerUser),
+    ["source", "cleaned", "annotated", "model"],
   );
 
   const healthResponse = await request(app).get("/health");

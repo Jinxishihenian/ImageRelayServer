@@ -387,8 +387,47 @@ function canResubmitCurrentStage(task: TaskRow, user: AuthenticatedUser): boolea
   }
 }
 
+function getTaskOwnedResultAlias(
+  task: TaskRow,
+  user: AuthenticatedUser,
+): TaskFileAlias | null {
+  // 任务完成后，执行人仍应能回看自己在该任务中提交的阶段产物。
+  // 这里单独补齐“本人提交结果”的可见性，避免只能按固定角色白名单看前序输入。
+  if (user.role === "cleaner" && task.cleanerId === user.id) {
+    return "cleaned";
+  }
+
+  if (user.role === "annotator" && task.annotatorId === user.id) {
+    return "annotated";
+  }
+
+  if (user.role === "trainer" && task.trainerId === user.id) {
+    return "model";
+  }
+
+  return null;
+}
+
+export function getAccessibleTaskFileAliases(
+  task: TaskRow,
+  user: AuthenticatedUser,
+): TaskFileAlias[] {
+  if (user.role === "admin") {
+    return getAllowedFileAliases("admin");
+  }
+
+  const aliases = new Set<TaskFileAlias>(getAllowedFileAliases(user.role));
+  const ownedResultAlias = getTaskOwnedResultAlias(task, user);
+
+  if (ownedResultAlias) {
+    aliases.add(ownedResultAlias);
+  }
+
+  return Array.from(aliases);
+}
+
 function getDownloadFields(task: TaskRow, user: AuthenticatedUser) {
-  return getAllowedFileAliases(user.role)
+  return getAccessibleTaskFileAliases(task, user)
     .map((alias) => {
       const file = getTaskFileInfo(task, alias);
 
@@ -451,7 +490,7 @@ function getAccessibleTaskFile(
     });
   }
 
-  if (user.role !== "admin" && !getAllowedFileAliases(user.role).includes(alias)) {
+  if (!getAccessibleTaskFileAliases(task, user).includes(alias)) {
     throw new AppError(`当前角色无权${errorAction}该文件。`, {
       statusCode: 403,
       code: "FORBIDDEN_FILE_ACCESS",
