@@ -16,6 +16,7 @@ import { initializeFileStorage } from "../dist/files/file-storage.js";
 import {
   buildTaskFileDownloadUrl,
   getAccessibleTaskFileAliases,
+  parseTaskStageDraftStage,
   resolveStageDraftFileReferenceForSave,
 } from "../dist/tasks/tasks.controller.js";
 import {
@@ -69,6 +70,18 @@ async function run() {
       "http://192.168.1.20:3000",
     ),
     "http://192.168.1.20:3000/api/v1/public/task-files/download?taskId=1",
+  );
+  assert.equal(parseTaskStageDraftStage("clean"), "clean");
+  assert.equal(parseTaskStageDraftStage("cleaned"), "clean");
+  assert.equal(parseTaskStageDraftStage("annotated"), "annotate");
+  assert.equal(parseTaskStageDraftStage("model"), "train");
+  assert.throws(
+    () => parseTaskStageDraftStage("invalid"),
+    (error) => {
+      assert.equal(error.code, "INVALID_STAGE_DRAFT_STAGE");
+      assert.equal(error.message, "当前阶段草稿参数无效。");
+      return true;
+    },
   );
   assert.deepEqual(
     await parseCleanedManifest(Buffer.from('["a.png","dir\\\\b.png"]', "utf8")),

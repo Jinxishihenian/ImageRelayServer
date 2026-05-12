@@ -104,6 +104,15 @@ const CURRENT_STAGE_DRAFT_DOWNLOAD_LINK_ROUTE = "/api/v1/public/task-stage-draft
 
 type TaskStageDraftStage = Extract<TaskReviewStage, "clean" | "annotate" | "train">;
 
+const STAGE_DRAFT_STAGE_ALIASES: Record<string, TaskStageDraftStage> = {
+  clean: "clean",
+  cleaned: "clean",
+  annotate: "annotate",
+  annotated: "annotate",
+  train: "train",
+  model: "train",
+};
+
 type StageDraftSnapshot = {
   stage: TaskStageDraftStage;
   storageKey: string;
@@ -474,8 +483,19 @@ function getCurrentStageDraft(task: TaskRow): StageDraftSnapshot | null {
   }
 }
 
-function parseTaskStageDraftStage(value: unknown): TaskStageDraftStage {
-  const normalizedStage = parseOptionalString(value, "stage");
+export function parseTaskStageDraftStage(value: unknown): TaskStageDraftStage {
+  const normalizedStage = parseOptionalString(value, "stage")?.toLowerCase();
+  const resolvedStage = normalizedStage ? STAGE_DRAFT_STAGE_ALIASES[normalizedStage] : undefined;
+
+  if (resolvedStage) {
+    return resolvedStage;
+  }
+
+  console.warn("Invalid stage draft stage query.", {
+    rawStage: value,
+    normalizedStage,
+    acceptedStages: Object.keys(STAGE_DRAFT_STAGE_ALIASES),
+  });
 
   if (normalizedStage === "clean" || normalizedStage === "annotate" || normalizedStage === "train") {
     return normalizedStage;
