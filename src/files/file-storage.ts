@@ -68,10 +68,30 @@ function sanitizeFileName(fileName: string): string {
   return baseName.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_");
 }
 
-function getTaskFileName(alias: TaskFileAlias, originalName: string): string {
-  const extension = path.extname(originalName);
-  const randomSuffix = crypto.randomBytes(4).toString("hex");
-  return `${alias}-${Date.now()}-${randomSuffix}${extension}`;
+function getTaskFileName(alias: TaskFileAlias, upload: UploadedFileRef): string {
+  // 任务阶段保存存在重复提交的概率，这里用上传引用本身生成稳定目标名，
+  // 让同一个 tmp 文件即使被并发保存多次，也能映射到同一个任务文件路径。
+  const extension = path.extname(upload.originalName);
+  const stableSuffix = crypto
+    .createHash("sha1")
+    .update(`${alias}:${upload.storageKey}:${upload.originalName}`)
+    .digest("hex")
+    .slice(0, 12);
+  return `${alias}-${stableSuffix}${extension}`;
+}
+
+async function fileExists(absolutePath: string): Promise<boolean> {
+  try {
+    await fs.access(absolutePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getTaskUploadTargetStorageKey(taskId: number, alias: TaskFileAlias, upload: UploadedFileRef): string {
+  const targetFileName = getTaskFileName(alias, upload);
+  return normalizeStorageKey(path.posix.join(TASKS_DIR_NAME, `task-${taskId}`, targetFileName));
 }
 
 function getUploadSessionPaths(uploadId: string) {
@@ -394,27 +414,75 @@ export async function moveTempUploadToTask(
 
   const sourcePath = resolveStoragePath(upload.storageKey);
   const taskDir = path.join(ensureStorageRoot(), TASKS_DIR_NAME, `task-${taskId}`);
-  const targetFileName = getTaskFileName(alias, upload.originalName);
-  const targetStorageKey = normalizeStorageKey(path.posix.join(TASKS_DIR_NAME, `task-${taskId}`, targetFileName));
+  const targetStorageKey = getTaskUploadTargetStorageKey(taskId, alias, upload);
   const targetPath = resolveStoragePath(targetStorageKey);
 
   await fs.mkdir(taskDir, { recursive: true });
 
-  try {
-    await fs.access(sourcePath);
-  } catch {
+  if (!(await fileExists(sourcePath))) {
+    if (await fileExists(targetPath)) {
+      return {
+        ...upload,
+        storageKey: targetStorageKey,
+      };
+    }
+
     throw new AppError("上传文件不存在或已失效，请重新上传。", {
       statusCode: 400,
       code: "UPLOAD_NOT_FOUND",
     });
   }
 
-  await fs.rename(sourcePath, targetPath);
+  try {
+    await fs.rename(sourcePath, targetPath);
+  } catch (error) {
+    // 并发保存时，另一个请求可能已经先一步把同一个 tmp 文件搬到了目标位置。
+    // 只要目标文件已经存在，就把这次保存当成幂等重放处理。
+    if (await fileExists(targetPath)) {
+      return {
+        ...upload,
+        storageKey: targetStorageKey,
+      };
+    }
+
+    throw error;
+  }
 
   return {
     ...upload,
     storageKey: targetStorageKey,
   };
+}
+
+export async function resolveTaskUploadReference(
+  upload: UploadedFileRef,
+  taskId: number,
+  alias: TaskFileAlias,
+): Promise<UploadedFileRef> {
+  if (!upload.storageKey.startsWith(`${TMP_DIR_NAME}/`)) {
+    return upload;
+  }
+
+  const sourcePath = resolveStoragePath(upload.storageKey);
+
+  if (await fileExists(sourcePath)) {
+    return upload;
+  }
+
+  const targetStorageKey = getTaskUploadTargetStorageKey(taskId, alias, upload);
+  const targetPath = resolveStoragePath(targetStorageKey);
+
+  if (await fileExists(targetPath)) {
+    return {
+      ...upload,
+      storageKey: targetStorageKey,
+    };
+  }
+
+  throw new AppError("上传文件不存在或已失效，请重新上传。", {
+    statusCode: 400,
+    code: "UPLOAD_NOT_FOUND",
+  });
 }
 
 export async function ensureStoredFileExists(storageKey: string): Promise<string> {

@@ -16,6 +16,7 @@ import { initializeFileStorage } from "../dist/files/file-storage.js";
 import {
   buildTaskFileDownloadUrl,
   getAccessibleTaskFileAliases,
+  resolveStageDraftFileReferenceForSave,
 } from "../dist/tasks/tasks.controller.js";
 import {
   buildTaskVisibilitySql,
@@ -353,6 +354,58 @@ async function run() {
   assert.equal(finalizeResponse.body.item.originalName, "smoke-upload.txt");
   assert.equal(finalizeResponse.body.item.mimeType, "text/plain");
   assert.equal(finalizeResponse.body.item.size, 12);
+
+  const existingDraftStorageKey = "tasks/task-49/cleaned-existing.json";
+  const existingDraftAbsolutePath = path.join(baseEnv.fileStorageDir, existingDraftStorageKey);
+  await fs.mkdir(path.dirname(existingDraftAbsolutePath), { recursive: true });
+  await fs.writeFile(existingDraftAbsolutePath, '["keep/a.png"]', "utf8");
+
+  const resolvedExistingDraft = await resolveStageDraftFileReferenceForSave({
+    uploadedFile: {
+      storageKey: "tmp/1778491156651-c44ffd5c9eba0988.json",
+      originalName: "清洗文件4.json",
+      mimeType: "application/json",
+      size: 16,
+    },
+    existingDraft: {
+      storageKey: existingDraftStorageKey,
+      originalName: "清洗文件4.json",
+      remark: "已保存草稿",
+      ready: true,
+    },
+    taskId: 49,
+    alias: "cleaned",
+  });
+  assert.deepEqual(resolvedExistingDraft, {
+    storageKey: existingDraftStorageKey,
+    originalName: "清洗文件4.json",
+    mimeType: "application/octet-stream",
+    size: 0,
+  });
+
+  await assert.rejects(
+    () =>
+      resolveStageDraftFileReferenceForSave({
+        uploadedFile: {
+          storageKey: "tmp/1778491156651-c44ffd5c9eba0988.json",
+          originalName: "清洗文件4.json",
+          mimeType: "application/json",
+          size: 16,
+        },
+        existingDraft: {
+          storageKey: existingDraftStorageKey,
+          originalName: "其他文件.json",
+          remark: "已保存草稿",
+          ready: true,
+        },
+        taskId: 49,
+        alias: "cleaned",
+      }),
+    (error) => {
+      assert.equal(error.code, "UPLOAD_NOT_FOUND");
+      return true;
+    },
+  );
 
   const originalEnv = { ...process.env };
 

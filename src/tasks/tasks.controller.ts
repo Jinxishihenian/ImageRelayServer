@@ -58,6 +58,7 @@ import {
   ensureStoredFileExists,
   getStoredFileSize,
   moveTempUploadToTask,
+  resolveTaskUploadReference,
 } from "../files/file-storage.js";
 import {
   clearModelIterationTaskReferences,
@@ -432,15 +433,6 @@ function getTaskOwnedResultAlias(
 
   return null;
 }
-
-type StageDraftSnapshot = {
-  stage: TaskStageDraftStage;
-  storageKey: string;
-  fileName: string;
-  remark: string | null;
-  savedAt: string | null;
-  ready: boolean;
-};
 
 function getCurrentStageDraft(task: TaskRow): StageDraftSnapshot | null {
   switch (task.status) {
@@ -1170,6 +1162,19 @@ function getDraftSnapshotByRole(task: TaskRow, role: Extract<UserRole, "cleaner"
   }
 }
 
+function buildUploadedFileRefFromDraftSnapshot(draft: ReturnType<typeof getDraftSnapshotByRole>): UploadedFileRef | null {
+  if (!draft.ready || !draft.storageKey || !draft.originalName) {
+    return null;
+  }
+
+  return {
+    storageKey: draft.storageKey,
+    originalName: draft.originalName,
+    mimeType: "application/octet-stream",
+    size: 0,
+  };
+}
+
 function assertArchiveFileName(fileName: string, message: string, code: string): void {
   if (isArchiveFileName(fileName)) {
     return;
@@ -1190,6 +1195,61 @@ function assertPreviewableTaskAlias(alias: TaskFileAlias): void {
     statusCode: 400,
     code: "UNSUPPORTED_PREVIEW_ALIAS",
   });
+}
+
+async function assertStageDraftFileReferenceAvailable(uploadedFile: UploadedFileRef): Promise<void> {
+  try {
+    await ensureStoredFileExists(uploadedFile.storageKey);
+  } catch (error) {
+    if (error instanceof AppError && error.code === "FILE_NOT_FOUND") {
+      // 这里单独把“上传引用失效”翻译成业务错误，避免前端把它误解为
+      // 清洗 JSON 内容错误，尤其是在重名文件场景下更容易误判问题根因。
+      throw new AppError("上传文件不存在或已失效，请重新上传。", {
+        statusCode: 400,
+        code: uploadedFile.storageKey.startsWith("tmp/")
+          ? "UPLOAD_NOT_FOUND"
+          : "STAGE_DRAFT_FILE_NOT_FOUND",
+        details: {
+          storageKey: uploadedFile.storageKey,
+        },
+      });
+    }
+
+    throw error;
+  }
+}
+
+export async function resolveStageDraftFileReferenceForSave(input: {
+  uploadedFile: UploadedFileRef;
+  existingDraft: ReturnType<typeof getDraftSnapshotByRole>;
+  taskId: number;
+  alias: TaskFileAlias;
+}): Promise<UploadedFileRef> {
+  try {
+    return await resolveTaskUploadReference(input.uploadedFile, input.taskId, input.alias);
+  } catch (error) {
+    const existingDraftFile = buildUploadedFileRefFromDraftSnapshot(input.existingDraft);
+    const canFallbackToExistingDraft =
+      error instanceof AppError &&
+      error.code === "UPLOAD_NOT_FOUND" &&
+      input.uploadedFile.storageKey.startsWith("tmp/") &&
+      existingDraftFile &&
+      existingDraftFile.originalName === input.uploadedFile.originalName;
+
+    if (!canFallbackToExistingDraft || !existingDraftFile) {
+      throw error;
+    }
+
+    try {
+      // 这里仅在“同名临时上传引用失效，但当前任务已经保存过可用草稿”时兜底。
+      // 这样可以兼容前端重复提交旧 tmp 引用或只改备注再次保存的场景，
+      // 同时避免把一个明确不同文件名的新上传悄悄回退成旧草稿。
+      await assertStageDraftFileReferenceAvailable(existingDraftFile);
+      return existingDraftFile;
+    } catch {
+      throw error;
+    }
+  }
 }
 
 async function resolveManifestBackedCleanedTaskFile(
@@ -1555,12 +1615,7 @@ export const saveTaskStageDraftHandler: RequestHandler = async (req, res) => {
   let uploadedFile = file ? parseUploadedFile(file) : null;
 
   if (!uploadedFile && existingDraft.storageKey && existingDraft.originalName) {
-    uploadedFile = {
-      storageKey: existingDraft.storageKey,
-      originalName: existingDraft.originalName,
-      mimeType: "application/octet-stream",
-      size: 0,
-    };
+    uploadedFile = buildUploadedFileRefFromDraftSnapshot(existingDraft);
   }
 
   if (!uploadedFile) {
@@ -1569,6 +1624,14 @@ export const saveTaskStageDraftHandler: RequestHandler = async (req, res) => {
       code: "INVALID_FILE_REFERENCE",
     });
   }
+
+  uploadedFile = await resolveStageDraftFileReferenceForSave({
+    uploadedFile,
+    existingDraft,
+    taskId: task.id,
+    alias: stageConfig.uploadAlias,
+  });
+  await assertStageDraftFileReferenceAvailable(uploadedFile);
 
   if (role === "cleaner") {
     if (!isJsonFileName(uploadedFile.originalName)) {
