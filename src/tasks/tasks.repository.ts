@@ -34,6 +34,21 @@ export type TaskRow = {
   reviewComment: string | null;
   reviewedBy: number | null;
   reviewedAt: string | null;
+  cleanedDraftFile: string | null;
+  cleanedDraftFileName: string | null;
+  cleanerDraftRemark: string | null;
+  cleanedDraftSavedAt: string | null;
+  cleanedDraftReady: boolean;
+  annotatedDraftFile: string | null;
+  annotatedDraftFileName: string | null;
+  annotatorDraftRemark: string | null;
+  annotatedDraftSavedAt: string | null;
+  annotatedDraftReady: boolean;
+  modelDraftFile: string | null;
+  modelDraftFileName: string | null;
+  trainerDraftRemark: string | null;
+  modelDraftSavedAt: string | null;
+  modelDraftReady: boolean;
   creatorId: number;
   cleanerId: number;
   annotatorId: number;
@@ -78,6 +93,21 @@ type TaskQueryRow = RowDataPacket & {
   review_comment: string | null;
   reviewed_by: number | null;
   reviewed_at: Date | string | null;
+  cleaned_draft_file: string | null;
+  cleaned_draft_file_name: string | null;
+  cleaner_draft_remark: string | null;
+  cleaned_draft_saved_at: Date | string | null;
+  cleaned_draft_ready: number;
+  annotated_draft_file: string | null;
+  annotated_draft_file_name: string | null;
+  annotator_draft_remark: string | null;
+  annotated_draft_saved_at: Date | string | null;
+  annotated_draft_ready: number;
+  model_draft_file: string | null;
+  model_draft_file_name: string | null;
+  trainer_draft_remark: string | null;
+  model_draft_saved_at: Date | string | null;
+  model_draft_ready: number;
   creator_id: number;
   cleaner_id: number;
   annotator_id: number;
@@ -190,9 +220,38 @@ type StageCompletionInput = {
   reviewStage: TaskReviewStage;
   currentStatus: TaskStatus;
   nextStatus: TaskStatus;
+  draftFileColumn: "cleaned_draft_file" | "annotated_draft_file" | "model_draft_file";
+  draftFileNameColumn:
+    | "cleaned_draft_file_name"
+    | "annotated_draft_file_name"
+    | "model_draft_file_name";
+  draftRemarkColumn:
+    | "cleaner_draft_remark"
+    | "annotator_draft_remark"
+    | "trainer_draft_remark";
+  draftReadyColumn: "cleaned_draft_ready" | "annotated_draft_ready" | "model_draft_ready";
   fileColumn: "cleaned_file" | "annotated_file" | "model_file";
   fileNameColumn: "cleaned_file_name" | "annotated_file_name" | "model_file_name";
   remarkColumn: "cleaner_remark" | "annotator_remark" | "trainer_remark";
+};
+
+type StageDraftSaveInput = {
+  taskId: number;
+  currentStatus: TaskStatus;
+  draftFileColumn: "cleaned_draft_file" | "annotated_draft_file" | "model_draft_file";
+  draftFileNameColumn:
+    | "cleaned_draft_file_name"
+    | "annotated_draft_file_name"
+    | "model_draft_file_name";
+  draftRemarkColumn:
+    | "cleaner_draft_remark"
+    | "annotator_draft_remark"
+    | "trainer_draft_remark";
+  draftSavedAtColumn:
+    | "cleaned_draft_saved_at"
+    | "annotated_draft_saved_at"
+    | "model_draft_saved_at";
+  draftReadyColumn: "cleaned_draft_ready" | "annotated_draft_ready" | "model_draft_ready";
   storageKey: string;
   originalName: string;
   remark: string;
@@ -236,6 +295,21 @@ function mapTaskRow(row: TaskQueryRow): TaskRow {
     reviewComment: row.review_comment,
     reviewedBy: row.reviewed_by,
     reviewedAt: row.reviewed_at ? toIsoString(row.reviewed_at) : null,
+    cleanedDraftFile: row.cleaned_draft_file,
+    cleanedDraftFileName: row.cleaned_draft_file_name,
+    cleanerDraftRemark: row.cleaner_draft_remark,
+    cleanedDraftSavedAt: row.cleaned_draft_saved_at ? toIsoString(row.cleaned_draft_saved_at) : null,
+    cleanedDraftReady: row.cleaned_draft_ready === 1,
+    annotatedDraftFile: row.annotated_draft_file,
+    annotatedDraftFileName: row.annotated_draft_file_name,
+    annotatorDraftRemark: row.annotator_draft_remark,
+    annotatedDraftSavedAt: row.annotated_draft_saved_at ? toIsoString(row.annotated_draft_saved_at) : null,
+    annotatedDraftReady: row.annotated_draft_ready === 1,
+    modelDraftFile: row.model_draft_file,
+    modelDraftFileName: row.model_draft_file_name,
+    trainerDraftRemark: row.trainer_draft_remark,
+    modelDraftSavedAt: row.model_draft_saved_at ? toIsoString(row.model_draft_saved_at) : null,
+    modelDraftReady: row.model_draft_ready === 1,
     creatorId: row.creator_id,
     cleanerId: row.cleaner_id,
     annotatorId: row.annotator_id,
@@ -298,6 +372,21 @@ function getBaseTaskSelectSql(): string {
       t.review_comment,
       t.reviewed_by,
       t.reviewed_at,
+      t.cleaned_draft_file,
+      t.cleaned_draft_file_name,
+      t.cleaner_draft_remark,
+      t.cleaned_draft_saved_at,
+      t.cleaned_draft_ready,
+      t.annotated_draft_file,
+      t.annotated_draft_file_name,
+      t.annotator_draft_remark,
+      t.annotated_draft_saved_at,
+      t.annotated_draft_ready,
+      t.model_draft_file,
+      t.model_draft_file_name,
+      t.trainer_draft_remark,
+      t.model_draft_saved_at,
+      t.model_draft_ready,
       t.creator_id,
       t.cleaner_id,
       t.annotator_id,
@@ -710,6 +799,31 @@ export async function attachGeneratedDatasetVersion(
   );
 }
 
+export async function saveTaskStageDraft(input: StageDraftSaveInput): Promise<boolean> {
+  const executor = getExecutor();
+  const result = await executor.executeResult(
+    `
+      UPDATE tasks
+      SET
+        ${input.draftFileColumn} = ?,
+        ${input.draftFileNameColumn} = ?,
+        ${input.draftRemarkColumn} = ?,
+        ${input.draftSavedAtColumn} = NOW(),
+        ${input.draftReadyColumn} = 1
+      WHERE id = ? AND status = ?
+    `,
+    [
+      input.storageKey,
+      input.originalName,
+      input.remark,
+      input.taskId,
+      input.currentStatus,
+    ],
+  );
+
+  return result.affectedRows > 0;
+}
+
 export async function completeTaskStage(input: StageCompletionInput): Promise<boolean> {
   const executor = getExecutor();
   const shouldAutoAdvance = !input.requiresReview;
@@ -718,22 +832,24 @@ export async function completeTaskStage(input: StageCompletionInput): Promise<bo
     `
       UPDATE tasks
       SET
-        ${input.fileColumn} = ?,
-        ${input.fileNameColumn} = ?,
-        ${input.remarkColumn} = ?,
+        ${input.fileColumn} = ${input.draftFileColumn},
+        ${input.fileNameColumn} = ${input.draftFileNameColumn},
+        ${input.remarkColumn} = ${input.draftRemarkColumn},
         status = ?,
         review_status = ?,
         review_stage = ?,
         review_comment = NULL,
         reviewed_by = NULL,
         reviewed_at = NULL,
-        finished_at = ?
-      WHERE id = ? AND status = ?
+        finished_at = ?,
+        ${input.draftReadyColumn} = 0
+      WHERE id = ?
+        AND status = ?
+        AND ${input.draftReadyColumn} = 1
+        AND ${input.draftFileColumn} IS NOT NULL
+        AND ${input.draftFileNameColumn} IS NOT NULL
     `,
     [
-      input.storageKey,
-      input.originalName,
-      input.remark,
       shouldAutoAdvance ? input.nextStatus : input.currentStatus,
       shouldAutoAdvance ? "none" : "pending_admin_review",
       shouldAutoAdvance ? null : input.reviewStage,

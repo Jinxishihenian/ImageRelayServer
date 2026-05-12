@@ -54,7 +54,11 @@ import {
   updateDatasetCurrentVersion,
   type DatasetVersionRow,
 } from "../datasets/datasets.repository.js";
-import { ensureStoredFileExists, moveTempUploadToTask } from "../files/file-storage.js";
+import {
+  ensureStoredFileExists,
+  getStoredFileSize,
+  moveTempUploadToTask,
+} from "../files/file-storage.js";
 import {
   clearModelIterationTaskReferences,
   findModelIterationById,
@@ -82,6 +86,7 @@ import {
   listModels,
   listTasksForUser,
   rejectTaskReview,
+  saveTaskStageDraft,
   type ModelListItem,
   type TaskRow,
 } from "./tasks.repository.js";
@@ -94,6 +99,26 @@ import {
 import { canUserAccessTask } from "./task-visibility.js";
 
 const DOWNLOAD_LINK_ROUTE = "/api/v1/public/task-files/download";
+const CURRENT_STAGE_DRAFT_DOWNLOAD_LINK_ROUTE = "/api/v1/public/task-stage-drafts/download";
+
+type TaskStageDraftStage = Extract<TaskReviewStage, "clean" | "annotate" | "train">;
+
+type StageDraftSnapshot = {
+  stage: TaskStageDraftStage;
+  storageKey: string;
+  fileName: string;
+  remark: string | null;
+  savedAt: string | null;
+  ready: boolean;
+};
+
+type TaskStageDraftView = StageDraftSnapshot & {
+  size: number;
+  canPreview: boolean;
+  previewEndpoint: string | null;
+  downloadEndpoint: string;
+  downloadLinkEndpoint: string;
+};
 
 function buildDatasetVersionLabel(versionNo: number, stage: DatasetStage): string {
   return `v${versionNo}_${stage}`;
@@ -408,6 +433,294 @@ function getTaskOwnedResultAlias(
   return null;
 }
 
+type StageDraftSnapshot = {
+  stage: TaskStageDraftStage;
+  storageKey: string;
+  fileName: string;
+  remark: string | null;
+  savedAt: string | null;
+  ready: boolean;
+};
+
+function getCurrentStageDraft(task: TaskRow): StageDraftSnapshot | null {
+  switch (task.status) {
+    case "pending_clean":
+      return task.cleanedDraftFile && task.cleanedDraftFileName
+        ? {
+            stage: "clean",
+            storageKey: task.cleanedDraftFile,
+            fileName: task.cleanedDraftFileName,
+            remark: task.cleanerDraftRemark,
+            savedAt: task.cleanedDraftSavedAt,
+            ready: task.cleanedDraftReady,
+          }
+        : null;
+    case "pending_annotate":
+      return task.annotatedDraftFile && task.annotatedDraftFileName
+        ? {
+            stage: "annotate",
+            storageKey: task.annotatedDraftFile,
+            fileName: task.annotatedDraftFileName,
+            remark: task.annotatorDraftRemark,
+            savedAt: task.annotatedDraftSavedAt,
+            ready: task.annotatedDraftReady,
+          }
+        : null;
+    case "pending_train":
+      return task.modelDraftFile && task.modelDraftFileName
+        ? {
+            stage: "train",
+            storageKey: task.modelDraftFile,
+            fileName: task.modelDraftFileName,
+            remark: task.trainerDraftRemark,
+            savedAt: task.modelDraftSavedAt,
+            ready: task.modelDraftReady,
+          }
+        : null;
+    case "finished":
+      return null;
+  }
+}
+
+function parseTaskStageDraftStage(value: unknown): TaskStageDraftStage {
+  const normalizedStage = parseOptionalString(value, "stage");
+
+  if (normalizedStage === "clean" || normalizedStage === "annotate" || normalizedStage === "train") {
+    return normalizedStage;
+  }
+
+  throw new AppError("当前阶段草稿参数无效。", {
+    statusCode: 400,
+    code: "INVALID_STAGE_DRAFT_STAGE",
+  });
+}
+
+function buildCurrentStageDraftDownloadName(task: TaskRow, draft: StageDraftSnapshot): string {
+  if (draft.stage === "clean") {
+    return getTaskFileDownloadName(task, "cleaned", draft.fileName);
+  }
+
+  return draft.fileName;
+}
+
+function canPreviewCurrentStageDraft(task: TaskRow, draft: StageDraftSnapshot): boolean {
+  if (draft.stage === "clean") {
+    return canPreviewTaskFile(task, "cleaned", draft.fileName);
+  }
+
+  if (draft.stage === "annotate") {
+    return canPreviewTaskFile(task, "annotated", draft.fileName);
+  }
+
+  return false;
+}
+
+async function buildCurrentStageDraftView(
+  task: TaskRow,
+  user: AuthenticatedUser,
+): Promise<TaskStageDraftView | null> {
+  if (!canViewCurrentStageDraft(task, user)) {
+    return null;
+  }
+
+  const draft = getCurrentStageDraft(task);
+
+  if (!draft) {
+    return null;
+  }
+
+  const size = await getStoredFileSize(draft.storageKey);
+  const canPreview = canPreviewCurrentStageDraft(task, draft);
+
+  return {
+    ...draft,
+    size,
+    canPreview,
+    previewEndpoint: canPreview
+      ? `/api/v1/tasks/${task.id}/stage-draft/preview?stage=${draft.stage}`
+      : null,
+    // 草稿下载保持独立路由，避免与正式产物 alias 复用后在任务流转时语义混淆。
+    downloadEndpoint: `/api/v1/tasks/${task.id}/stage-draft/download?stage=${draft.stage}`,
+    downloadLinkEndpoint: `/api/v1/tasks/${task.id}/stage-draft/download-link?stage=${draft.stage}`,
+  };
+}
+
+function getStageDraftSnapshotByStage(task: TaskRow, stage: TaskStageDraftStage): StageDraftSnapshot | null {
+  switch (stage) {
+    case "clean":
+      return task.cleanedDraftFile && task.cleanedDraftFileName
+        ? {
+            stage: "clean",
+            storageKey: task.cleanedDraftFile,
+            fileName: task.cleanedDraftFileName,
+            remark: task.cleanerDraftRemark,
+            savedAt: task.cleanedDraftSavedAt,
+            ready: task.cleanedDraftReady,
+          }
+        : null;
+    case "annotate":
+      return task.annotatedDraftFile && task.annotatedDraftFileName
+        ? {
+            stage: "annotate",
+            storageKey: task.annotatedDraftFile,
+            fileName: task.annotatedDraftFileName,
+            remark: task.annotatorDraftRemark,
+            savedAt: task.annotatedDraftSavedAt,
+            ready: task.annotatedDraftReady,
+          }
+        : null;
+    case "train":
+      return task.modelDraftFile && task.modelDraftFileName
+        ? {
+            stage: "train",
+            storageKey: task.modelDraftFile,
+            fileName: task.modelDraftFileName,
+            remark: task.trainerDraftRemark,
+            savedAt: task.modelDraftSavedAt,
+            ready: task.modelDraftReady,
+          }
+        : null;
+  }
+}
+
+function assertCanAccessStageDraft(task: TaskRow, user: AuthenticatedUser, stage: TaskStageDraftStage): StageDraftSnapshot {
+  if (!canAccessTask(task, user)) {
+    throw new AppError("当前用户无权访问该任务草稿。", {
+      statusCode: 403,
+      code: "FORBIDDEN_FILE_ACCESS",
+    });
+  }
+
+  const draft = getStageDraftSnapshotByStage(task, stage);
+
+  if (!draft) {
+    throw new AppError("当前阶段草稿不存在。", {
+      statusCode: 404,
+      code: "TASK_STAGE_DRAFT_NOT_FOUND",
+    });
+  }
+
+  const allowedRoles: UserRole[] = ["admin"];
+
+  switch (stage) {
+    case "clean":
+      if (task.cleanerId === user.id) {
+        allowedRoles.push("cleaner");
+      }
+      break;
+    case "annotate":
+      if (task.annotatorId === user.id) {
+        allowedRoles.push("annotator");
+      }
+      break;
+    case "train":
+      if (task.trainerId === user.id) {
+        allowedRoles.push("trainer");
+      }
+      break;
+  }
+
+  if (!allowedRoles.includes(user.role)) {
+    throw new AppError("当前角色无权访问该阶段草稿。", {
+      statusCode: 403,
+      code: "FORBIDDEN_FILE_ACCESS",
+    });
+  }
+
+  return draft;
+}
+
+async function getPreviewableStageDraftFile(
+  task: TaskRow,
+  user: AuthenticatedUser,
+  stage: TaskStageDraftStage,
+): Promise<
+  | {
+      mode: "archive";
+      absolutePath: string;
+      originalName: string;
+      previewLabel: string;
+    }
+  | {
+      mode: "manifest";
+      sourceArchiveAbsolutePath: string;
+      originalName: string;
+      previewItems: Awaited<ReturnType<typeof resolveCleanedManifestSelection>>["previewItems"];
+      previewLabel: string;
+    }
+> {
+  const draft = assertCanAccessStageDraft(task, user, stage);
+
+  if (!canPreviewCurrentStageDraft(task, draft)) {
+    throw new AppError("当前阶段草稿暂不支持预览。", {
+      statusCode: 400,
+      code: "UNSUPPORTED_PREVIEW_ALIAS",
+    });
+  }
+
+  if (stage === "clean" && isJsonFileName(draft.fileName)) {
+    const manifestBackedFile = await resolveManifestBackedCleanedTaskFile(task, draft.storageKey);
+
+    return {
+      mode: "manifest",
+      sourceArchiveAbsolutePath: manifestBackedFile.sourceArchiveAbsolutePath,
+      originalName: draft.fileName,
+      previewItems: manifestBackedFile.previewItems,
+      previewLabel: FILE_LABELS.source,
+    };
+  }
+
+  return {
+    mode: "archive",
+    absolutePath: await ensureStoredFileExists(draft.storageKey),
+    originalName: draft.fileName,
+    previewLabel: stage === "annotate" ? FILE_LABELS.annotated : FILE_LABELS.cleaned,
+  };
+}
+
+async function streamStageDraftDownloadResponse(
+  req: Parameters<RequestHandler>[0],
+  res: Response,
+  task: TaskRow,
+  draft: StageDraftSnapshot,
+): Promise<void> {
+  if (draft.stage === "clean" && isJsonFileName(draft.fileName)) {
+    const manifestBackedFile = await resolveManifestBackedCleanedTaskFile(task, draft.storageKey);
+
+    if (req.headers.range) {
+      throw new AppError("动态生成的清洗结果暂不支持断点续传下载。", {
+        statusCode: 416,
+        code: "UNSUPPORTED_DYNAMIC_RANGE_DOWNLOAD",
+      });
+    }
+
+    await streamGeneratedArchiveDownload(
+      res,
+      buildCurrentStageDraftDownloadName(task, draft),
+      async () => {
+        await streamSelectedEntriesAsZip({
+          sourceArchivePath: manifestBackedFile.sourceArchiveAbsolutePath,
+          selectedPaths: manifestBackedFile.selectedPaths,
+          sourceArchiveLabel: FILE_LABELS.source,
+          target: res,
+        });
+      },
+    );
+    return;
+  }
+
+  const absolutePath = await ensureStoredFileExists(draft.storageKey);
+  await streamStoredFileDownload(req, res, absolutePath, buildCurrentStageDraftDownloadName(task, draft));
+}
+
+function canViewCurrentStageDraft(task: TaskRow, user: AuthenticatedUser): boolean {
+  if (!canHandleCurrentStage(task, user) && !canResubmitCurrentStage(task, user)) {
+    return false;
+  }
+
+  return getCurrentStageDraft(task) !== null;
+}
+
 export function getAccessibleTaskFileAliases(
   task: TaskRow,
   user: AuthenticatedUser,
@@ -660,6 +973,7 @@ function mapTaskSummary(task: TaskRow, user: AuthenticatedUser) {
 async function mapTaskDetail(task: TaskRow, user: AuthenticatedUser) {
   const stageRole = getStageRole(task.status);
   const dataset = await buildTaskDatasetSnapshot(task);
+  const currentStageDraft = await buildCurrentStageDraftView(task, user);
 
   return {
     ...mapTaskSummary(task, user),
@@ -669,6 +983,9 @@ async function mapTaskDetail(task: TaskRow, user: AuthenticatedUser) {
       trainer: task.trainerRemark,
     },
     downloads: getDownloadFields(task, user),
+    currentStageDraft,
+    hasCurrentStageDraft: Boolean(currentStageDraft?.ready),
+    canSaveCurrentStageDraft: canHandleCurrentStage(task, user) || canResubmitCurrentStage(task, user),
     canSubmitCurrentStage: canHandleCurrentStage(task, user),
     canReviewCurrentStage: canAdminReviewCurrentStage(task, user),
     canResubmitCurrentStage: canResubmitCurrentStage(task, user),
@@ -776,6 +1093,81 @@ function parseUploadedFile(input: unknown): UploadedFileRef {
     mimeType: typeof candidate.mimeType === "string" ? candidate.mimeType : "application/octet-stream",
     size: typeof candidate.size === "number" ? candidate.size : 0,
   };
+}
+
+function getStagePersistenceConfig(role: UserRole) {
+  switch (role) {
+    case "cleaner":
+      return {
+        draftFileColumn: "cleaned_draft_file" as const,
+        draftFileNameColumn: "cleaned_draft_file_name" as const,
+        draftRemarkColumn: "cleaner_draft_remark" as const,
+        draftSavedAtColumn: "cleaned_draft_saved_at" as const,
+        draftReadyColumn: "cleaned_draft_ready" as const,
+        finalFileColumn: "cleaned_file" as const,
+        finalFileNameColumn: "cleaned_file_name" as const,
+        finalRemarkColumn: "cleaner_remark" as const,
+        uploadAlias: "cleaned" as const,
+        datasetStage: "cleaned" as const,
+      };
+    case "annotator":
+      return {
+        draftFileColumn: "annotated_draft_file" as const,
+        draftFileNameColumn: "annotated_draft_file_name" as const,
+        draftRemarkColumn: "annotator_draft_remark" as const,
+        draftSavedAtColumn: "annotated_draft_saved_at" as const,
+        draftReadyColumn: "annotated_draft_ready" as const,
+        finalFileColumn: "annotated_file" as const,
+        finalFileNameColumn: "annotated_file_name" as const,
+        finalRemarkColumn: "annotator_remark" as const,
+        uploadAlias: "annotated" as const,
+        datasetStage: "annotated" as const,
+      };
+    case "trainer":
+      return {
+        draftFileColumn: "model_draft_file" as const,
+        draftFileNameColumn: "model_draft_file_name" as const,
+        draftRemarkColumn: "trainer_draft_remark" as const,
+        draftSavedAtColumn: "model_draft_saved_at" as const,
+        draftReadyColumn: "model_draft_ready" as const,
+        finalFileColumn: "model_file" as const,
+        finalFileNameColumn: "model_file_name" as const,
+        finalRemarkColumn: "trainer_remark" as const,
+        uploadAlias: "model" as const,
+        datasetStage: null,
+      };
+    case "admin":
+      throw new AppError("管理员没有阶段草稿配置。", {
+        statusCode: 400,
+        code: "INVALID_STAGE_OPERATOR",
+      });
+  }
+}
+
+function getDraftSnapshotByRole(task: TaskRow, role: Extract<UserRole, "cleaner" | "annotator" | "trainer">) {
+  switch (role) {
+    case "cleaner":
+      return {
+        storageKey: task.cleanedDraftFile,
+        originalName: task.cleanedDraftFileName,
+        remark: task.cleanerDraftRemark,
+        ready: task.cleanedDraftReady,
+      };
+    case "annotator":
+      return {
+        storageKey: task.annotatedDraftFile,
+        originalName: task.annotatedDraftFileName,
+        remark: task.annotatorDraftRemark,
+        ready: task.annotatedDraftReady,
+      };
+    case "trainer":
+      return {
+        storageKey: task.modelDraftFile,
+        originalName: task.modelDraftFileName,
+        remark: task.trainerDraftRemark,
+        ready: task.modelDraftReady,
+      };
+  }
 }
 
 function assertArchiveFileName(fileName: string, message: string, code: string): void {
@@ -1117,6 +1509,115 @@ export const deleteTaskHandler: RequestHandler = async (req, res) => {
   res.status(204).send();
 };
 
+export const saveTaskStageDraftHandler: RequestHandler = async (req, res) => {
+  const authUser = getAuthUser(req);
+  const taskId = parsePositiveInteger(getSingleRouteParam(req.params.taskId, "taskId"), "taskId");
+  const task = await findTaskById(taskId);
+
+  if (!task) {
+    throw new AppError("任务不存在。", {
+      statusCode: 404,
+      code: "TASK_NOT_FOUND",
+    });
+  }
+
+  if (!canHandleCurrentStage(task, authUser) && !canResubmitCurrentStage(task, authUser)) {
+    throw new AppError("当前任务不允许由你保存草稿。", {
+      statusCode: 403,
+      code: "INVALID_STAGE_OPERATOR",
+    });
+  }
+
+  if (task.status === "finished") {
+    throw new AppError("已完成任务不可保存阶段草稿。", {
+      statusCode: 400,
+      code: "TASK_ALREADY_FINISHED",
+    });
+  }
+
+  const role = authUser.role;
+
+  if (role === "admin") {
+    throw new AppError("管理员不能保存阶段草稿。", {
+      statusCode: 403,
+      code: "INVALID_STAGE_OPERATOR",
+    });
+  }
+
+  const { file, remark } = req.body as {
+    file?: unknown;
+    remark?: string;
+  };
+
+  const normalizedRemark = remark?.trim() ?? "";
+  const stageConfig = getStagePersistenceConfig(role);
+  const existingDraft = getDraftSnapshotByRole(task, role);
+  let uploadedFile = file ? parseUploadedFile(file) : null;
+
+  if (!uploadedFile && existingDraft.storageKey && existingDraft.originalName) {
+    uploadedFile = {
+      storageKey: existingDraft.storageKey,
+      originalName: existingDraft.originalName,
+      mimeType: "application/octet-stream",
+      size: 0,
+    };
+  }
+
+  if (!uploadedFile) {
+    throw new AppError("请先上传阶段结果文件。", {
+      statusCode: 400,
+      code: "INVALID_FILE_REFERENCE",
+    });
+  }
+
+  if (role === "cleaner") {
+    if (!isJsonFileName(uploadedFile.originalName)) {
+      throw new AppError("清洗阶段仅允许上传 JSON 清单文件。", {
+        statusCode: 400,
+        code: "INVALID_STAGE_FILE_TYPE",
+      });
+    }
+
+    await resolveManifestBackedCleanedTaskFile(task, uploadedFile.storageKey);
+  } else if (role === "annotator") {
+    assertArchiveFileName(
+      uploadedFile.originalName,
+      "标注阶段仅允许上传 zip、rar、7z 压缩包。",
+      "INVALID_STAGE_FILE_TYPE",
+    );
+  }
+
+  const storedFile = uploadedFile.storageKey.startsWith("tmp/")
+    ? await moveTempUploadToTask(uploadedFile, task.id, stageConfig.uploadAlias)
+    : uploadedFile;
+
+  const updated = await saveTaskStageDraft({
+    taskId: task.id,
+    currentStatus: task.status,
+    draftFileColumn: stageConfig.draftFileColumn,
+    draftFileNameColumn: stageConfig.draftFileNameColumn,
+    draftRemarkColumn: stageConfig.draftRemarkColumn,
+    draftSavedAtColumn: stageConfig.draftSavedAtColumn,
+    draftReadyColumn: stageConfig.draftReadyColumn,
+    storageKey: storedFile.storageKey,
+    originalName: storedFile.originalName,
+    remark: normalizedRemark,
+  });
+
+  if (!updated) {
+    throw new AppError("任务状态已变化，请刷新后重试。", {
+      statusCode: 409,
+      code: "TASK_STATUS_CONFLICT",
+    });
+  }
+
+  const latestTask = await findTaskById(task.id);
+
+  res.json({
+    item: latestTask ? await mapTaskDetail(latestTask, authUser) : null,
+  });
+};
+
 export const completeTaskStageHandler: RequestHandler = async (req, res) => {
   const authUser = getAuthUser(req);
   const taskId = parsePositiveInteger(getSingleRouteParam(req.params.taskId, "taskId"), "taskId");
@@ -1143,41 +1644,22 @@ export const completeTaskStageHandler: RequestHandler = async (req, res) => {
     });
   }
 
-  const { file, remark } = req.body as {
-    file?: unknown;
-    remark?: string;
-  };
-  const uploadedFile = parseUploadedFile(file);
-
-  if (authUser.role === "cleaner") {
-    if (!isJsonFileName(uploadedFile.originalName)) {
-      throw new AppError("清洗阶段仅允许上传 JSON 清单文件。", {
-        statusCode: 400,
-        code: "INVALID_STAGE_FILE_TYPE",
-      });
-    }
-
-    // 清洗阶段上传的是“保留图片名单”而不是新压缩包，所以要在正式挂到任务前，
-    // 先校验 JSON 中的每个相对路径都确实存在于初始 zip 内，避免落库后才发现不可下载。
-    await resolveManifestBackedCleanedTaskFile(task, uploadedFile.storageKey);
-  } else if (authUser.role === "annotator") {
-    assertArchiveFileName(
-      uploadedFile.originalName,
-      "标注阶段仅允许上传 zip、rar、7z 压缩包。",
-      "INVALID_STAGE_FILE_TYPE",
-    );
+  if (authUser.role === "admin") {
+    throw new AppError("管理员不能确认提交阶段结果。", {
+      statusCode: 403,
+      code: "INVALID_STAGE_OPERATOR",
+    });
   }
 
-  const normalizedRemark = remark?.trim() ?? "";
-  const storedFile = await moveTempUploadToTask(
-    uploadedFile,
-    task.id,
-    authUser.role === "cleaner"
-      ? "cleaned"
-      : authUser.role === "annotator"
-        ? "annotated"
-        : "model",
-  );
+  const stageConfig = getStagePersistenceConfig(authUser.role);
+  const currentDraft = getDraftSnapshotByRole(task, authUser.role);
+
+  if (!currentDraft.ready || !currentDraft.storageKey || !currentDraft.originalName) {
+    throw new AppError("请先点击完成当前阶段，保存草稿后再确认提交。", {
+      statusCode: 400,
+      code: "TASK_STAGE_DRAFT_REQUIRED",
+    });
+  }
 
   const reviewStage = getStageByStatus(task.status);
 
@@ -1189,39 +1671,19 @@ export const completeTaskStageHandler: RequestHandler = async (req, res) => {
   }
 
   const nextStatus = getNextStatus(task.status);
-  const stageDatasetVersion =
-    authUser.role === "cleaner"
-      ? "cleaned"
-      : authUser.role === "annotator"
-        ? "annotated"
-        : null;
   const updated = await completeTaskStage({
     taskId: task.id,
     requiresReview: getCurrentStageNeedsReview(task),
     reviewStage,
     currentStatus: task.status,
     nextStatus,
-    fileColumn:
-      authUser.role === "cleaner"
-        ? "cleaned_file"
-        : authUser.role === "annotator"
-          ? "annotated_file"
-          : "model_file",
-    fileNameColumn:
-      authUser.role === "cleaner"
-        ? "cleaned_file_name"
-        : authUser.role === "annotator"
-          ? "annotated_file_name"
-          : "model_file_name",
-    remarkColumn:
-      authUser.role === "cleaner"
-        ? "cleaner_remark"
-        : authUser.role === "annotator"
-          ? "annotator_remark"
-          : "trainer_remark",
-    storageKey: storedFile.storageKey,
-    originalName: storedFile.originalName,
-    remark: normalizedRemark,
+    draftFileColumn: stageConfig.draftFileColumn,
+    draftFileNameColumn: stageConfig.draftFileNameColumn,
+    draftRemarkColumn: stageConfig.draftRemarkColumn,
+    draftReadyColumn: stageConfig.draftReadyColumn,
+    fileColumn: stageConfig.finalFileColumn,
+    fileNameColumn: stageConfig.finalFileNameColumn,
+    remarkColumn: stageConfig.finalRemarkColumn,
   });
 
   if (!updated) {
@@ -1231,12 +1693,12 @@ export const completeTaskStageHandler: RequestHandler = async (req, res) => {
     });
   }
 
-  if (!getCurrentStageNeedsReview(task) && stageDatasetVersion) {
+  if (!getCurrentStageNeedsReview(task) && stageConfig.datasetStage) {
     await generateTaskDatasetVersionIfNeeded({
       task,
-      stage: stageDatasetVersion,
-      storageKey: storedFile.storageKey,
-      fileName: storedFile.originalName,
+      stage: stageConfig.datasetStage,
+      storageKey: currentDraft.storageKey,
+      fileName: currentDraft.originalName,
       reviewBased: false,
       createdBy: authUser.id,
     });
@@ -1448,6 +1910,60 @@ export const createTaskFileDownloadLinkHandler: RequestHandler = async (req, res
   });
 };
 
+export const downloadCurrentStageDraftHandler: RequestHandler = async (req, res) => {
+  const authUser = getAuthUser(req);
+  const taskId = parsePositiveInteger(getSingleRouteParam(req.params.taskId, "taskId"), "taskId");
+  const stage = parseTaskStageDraftStage(req.query.stage);
+  const task = await findTaskById(taskId);
+
+  if (!task) {
+    throw new AppError("任务不存在。", {
+      statusCode: 404,
+      code: "TASK_NOT_FOUND",
+    });
+  }
+
+  const draft = assertCanAccessStageDraft(task, authUser, stage);
+  await streamStageDraftDownloadResponse(req, res, task, draft);
+};
+
+export const createCurrentStageDraftDownloadLinkHandler: RequestHandler = async (req, res) => {
+  const authUser = getAuthUser(req);
+  const taskId = parsePositiveInteger(getSingleRouteParam(req.params.taskId, "taskId"), "taskId");
+  const stage = parseTaskStageDraftStage(req.query.stage);
+  const task = await findTaskById(taskId);
+
+  if (!task) {
+    throw new AppError("任务不存在。", {
+      statusCode: 404,
+      code: "TASK_NOT_FOUND",
+    });
+  }
+
+  assertCanAccessStageDraft(task, authUser, stage);
+
+  const env = req.app.get("envConfig") as {
+    downloadLinkSecret: string;
+    downloadLinkTtlMs: number;
+    fileBaseUrl?: string;
+  };
+  const expiresAt = Date.now() + env.downloadLinkTtlMs;
+  const signature = createSignedDownloadSignature(
+    [taskId, stage],
+    expiresAt,
+    env.downloadLinkSecret,
+  );
+  const url = buildTaskFileDownloadUrl(
+    `${CURRENT_STAGE_DRAFT_DOWNLOAD_LINK_ROUTE}?taskId=${taskId}&stage=${stage}&expiresAt=${expiresAt}&signature=${encodeURIComponent(signature)}`,
+    env.fileBaseUrl,
+  );
+
+  res.json({
+    url,
+    expiresAt: new Date(expiresAt).toISOString(),
+  });
+};
+
 export const publicDownloadTaskFileHandler: RequestHandler = async (req, res) => {
   const taskIdRaw = typeof req.query.taskId === "string" ? req.query.taskId : undefined;
   const fileAlias = typeof req.query.fileAlias === "string" ? req.query.fileAlias : undefined;
@@ -1533,6 +2049,76 @@ export const publicDownloadTaskFileHandler: RequestHandler = async (req, res) =>
   });
 };
 
+export const publicDownloadCurrentStageDraftHandler: RequestHandler = async (req, res) => {
+  const taskIdRaw = typeof req.query.taskId === "string" ? req.query.taskId : undefined;
+  const stageRaw = typeof req.query.stage === "string" ? req.query.stage : undefined;
+  const expiresAtRaw = typeof req.query.expiresAt === "string" ? req.query.expiresAt : undefined;
+  const signature = typeof req.query.signature === "string" ? req.query.signature : undefined;
+
+  if (!taskIdRaw || !stageRaw || !expiresAtRaw || !signature) {
+    throw new AppError("下载链接缺少必要参数。", {
+      statusCode: 400,
+      code: "INVALID_DOWNLOAD_LINK",
+    });
+  }
+
+  const taskId = parsePositiveInteger(taskIdRaw, "taskId");
+  const stage = parseTaskStageDraftStage(stageRaw);
+  const expiresAt = Number(expiresAtRaw);
+
+  if (!Number.isInteger(expiresAt)) {
+    throw new AppError("下载链接参数不正确。", {
+      statusCode: 400,
+      code: "INVALID_DOWNLOAD_LINK",
+    });
+  }
+
+  if (expiresAt <= Date.now()) {
+    throw new AppError("下载链接已失效，请重新复制。", {
+      statusCode: 410,
+      code: "DOWNLOAD_LINK_EXPIRED",
+    });
+  }
+
+  const env = req.app.get("envConfig") as {
+    downloadLinkSecret: string;
+  };
+
+  if (
+    !isValidSignedDownloadSignature(
+      signature,
+      [taskId, stage],
+      expiresAt,
+      env.downloadLinkSecret,
+    )
+  ) {
+    throw new AppError("下载链接无效或已被篡改。", {
+      statusCode: 403,
+      code: "INVALID_DOWNLOAD_LINK",
+    });
+  }
+
+  const task = await findTaskById(taskId);
+
+  if (!task) {
+    throw new AppError("任务不存在。", {
+      statusCode: 404,
+      code: "TASK_NOT_FOUND",
+    });
+  }
+
+  const draft = getStageDraftSnapshotByStage(task, stage);
+
+  if (!draft) {
+    throw new AppError("当前阶段草稿不存在。", {
+      statusCode: 404,
+      code: "TASK_STAGE_DRAFT_NOT_FOUND",
+    });
+  }
+
+  await streamStageDraftDownloadResponse(req, res, task, draft);
+};
+
 export const listTaskFilePreviewHandler: RequestHandler = async (req, res) => {
   const authUser = getAuthUser(req);
   const taskId = parsePositiveInteger(getSingleRouteParam(req.params.taskId, "taskId"), "taskId");
@@ -1561,6 +2147,42 @@ export const listTaskFilePreviewHandler: RequestHandler = async (req, res) => {
   const pagedItems = items.slice(startIndex, startIndex + pageSize).map((item) => ({
     ...item,
     endpoint: `/api/v1/tasks/${task.id}/files/${alias}/preview/${item.id}`,
+  }));
+
+  res.json({
+    items: pagedItems,
+    pagination: buildPaginationMeta(page, pageSize, items.length),
+  });
+};
+
+export const listCurrentStageDraftPreviewHandler: RequestHandler = async (req, res) => {
+  const authUser = getAuthUser(req);
+  const taskId = parsePositiveInteger(getSingleRouteParam(req.params.taskId, "taskId"), "taskId");
+  const stage = parseTaskStageDraftStage(req.query.stage);
+  const task = await findTaskById(taskId);
+
+  if (!task) {
+    throw new AppError("任务不存在。", {
+      statusCode: 404,
+      code: "TASK_NOT_FOUND",
+    });
+  }
+
+  const previewableFile = await getPreviewableStageDraftFile(task, authUser, stage);
+  const pagination = parsePaginationQuery(req.query, {
+    page: 1,
+    pageSize: 24,
+  });
+  const pageSize = Math.min(Math.max(pagination.pageSize, 1), 60);
+  const items = previewableFile.mode === "manifest"
+    ? previewableFile.previewItems
+    : await listZipPreviewItems(previewableFile.absolutePath, previewableFile.previewLabel);
+  const totalPages = items.length === 0 ? 0 : Math.ceil(items.length / pageSize);
+  const page = totalPages > 0 ? Math.min(pagination.page, totalPages) : pagination.page;
+  const startIndex = (page - 1) * pageSize;
+  const pagedItems = items.slice(startIndex, startIndex + pageSize).map((item) => ({
+    ...item,
+    endpoint: `/api/v1/tasks/${task.id}/stage-draft/preview/${item.id}?stage=${stage}`,
   }));
 
   res.json({
@@ -1606,5 +2228,44 @@ export const previewTaskFileImageHandler: RequestHandler = async (req, res) => {
   res.setHeader("Cache-Control", "private, no-store");
 
   // 预览图片按条目流式输出，避免一次性把整张图读入内存。
+  await pipeline(previewFile.stream, res);
+};
+
+export const previewCurrentStageDraftImageHandler: RequestHandler = async (req, res) => {
+  const authUser = getAuthUser(req);
+  const taskId = parsePositiveInteger(getSingleRouteParam(req.params.taskId, "taskId"), "taskId");
+  const stage = parseTaskStageDraftStage(req.query.stage);
+  const entryId = getSingleRouteParam(req.params.entryId, "entryId");
+  const task = await findTaskById(taskId);
+
+  if (!task) {
+    throw new AppError("任务不存在。", {
+      statusCode: 404,
+      code: "TASK_NOT_FOUND",
+    });
+  }
+
+  const previewableFile = await getPreviewableStageDraftFile(task, authUser, stage);
+
+  if (previewableFile.mode === "manifest" && !previewableFile.previewItems.some((item) => item.id === entryId)) {
+    throw new AppError("预览图片不存在。", {
+      statusCode: 404,
+      code: "PREVIEW_ENTRY_NOT_FOUND",
+    });
+  }
+
+  const previewFile = await openZipPreviewStream(
+    previewableFile.mode === "manifest" ? previewableFile.sourceArchiveAbsolutePath : previewableFile.absolutePath,
+    entryId,
+    previewableFile.previewLabel,
+  );
+
+  res.setHeader("Content-Type", previewFile.mimeType);
+  res.setHeader(
+    "Content-Disposition",
+    `inline; filename*=UTF-8''${encodeURIComponent(previewFile.fileName)}`,
+  );
+  res.setHeader("Cache-Control", "private, no-store");
+
   await pipeline(previewFile.stream, res);
 };

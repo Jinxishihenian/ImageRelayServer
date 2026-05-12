@@ -35,6 +35,21 @@ const REQUIRED_TASK_COLUMNS = [
   "review_comment",
   "reviewed_by",
   "reviewed_at",
+  "cleaned_draft_file",
+  "cleaned_draft_file_name",
+  "cleaner_draft_remark",
+  "cleaned_draft_saved_at",
+  "cleaned_draft_ready",
+  "annotated_draft_file",
+  "annotated_draft_file_name",
+  "annotator_draft_remark",
+  "annotated_draft_saved_at",
+  "annotated_draft_ready",
+  "model_draft_file",
+  "model_draft_file_name",
+  "trainer_draft_remark",
+  "model_draft_saved_at",
+  "model_draft_ready",
 ] as const;
 
 const REQUIRED_MODEL_ITERATION_COLUMNS = [

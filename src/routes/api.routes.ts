@@ -23,17 +23,23 @@ import {
 } from "../datasets/datasets.controller.js";
 import {
   completeTaskStageHandler,
+  createCurrentStageDraftDownloadLinkHandler,
   createTaskFileDownloadLinkHandler,
   createTaskHandler,
   deleteTaskHandler,
+  downloadCurrentStageDraftHandler,
   downloadTaskFileHandler,
   getTaskDetailHandler,
   listModelsHandler,
+  listCurrentStageDraftPreviewHandler,
   listTasksHandler,
   listTaskFilePreviewHandler,
+  previewCurrentStageDraftImageHandler,
   publicDownloadTaskFileHandler,
+  publicDownloadCurrentStageDraftHandler,
   previewTaskFileImageHandler,
   reviewTaskStageHandler,
+  saveTaskStageDraftHandler,
 } from "../tasks/tasks.controller.js";
 import {
   createModelIterationHandler,
@@ -101,8 +107,25 @@ export function createApiRouter(env: AppEnv) {
   apiRouter.get("/tasks/:taskId", authRequired, getTaskDetailHandler);
   apiRouter.post("/tasks", authRequired, requireRoles("admin"), createTaskHandler);
   apiRouter.delete("/tasks/:taskId", authRequired, requireRoles("admin"), deleteTaskHandler);
+  apiRouter.post("/tasks/:taskId/save-stage-draft", authRequired, saveTaskStageDraftHandler);
   apiRouter.post("/tasks/:taskId/complete-stage", authRequired, completeTaskStageHandler);
   apiRouter.post("/tasks/:taskId/review", authRequired, requireRoles("admin"), reviewTaskStageHandler);
+  apiRouter.get("/tasks/:taskId/stage-draft/download", authRequired, downloadCurrentStageDraftHandler);
+  apiRouter.get(
+    "/tasks/:taskId/stage-draft/download-link",
+    authRequired,
+    createCurrentStageDraftDownloadLinkHandler,
+  );
+  apiRouter.get(
+    "/tasks/:taskId/stage-draft/preview",
+    authRequired,
+    listCurrentStageDraftPreviewHandler,
+  );
+  apiRouter.get(
+    "/tasks/:taskId/stage-draft/preview/:entryId",
+    authRequired,
+    previewCurrentStageDraftImageHandler,
+  );
   apiRouter.get("/tasks/:taskId/files/:fileAlias/download", authRequired, downloadTaskFileHandler);
   apiRouter.get(
     "/tasks/:taskId/files/:fileAlias/download-link",
@@ -116,6 +139,7 @@ export function createApiRouter(env: AppEnv) {
     previewTaskFileImageHandler,
   );
   apiRouter.get("/public/task-files/download", publicDownloadTaskFileHandler);
+  apiRouter.get("/public/task-stage-drafts/download", publicDownloadCurrentStageDraftHandler);
   apiRouter.get("/public/dataset-versions/download", publicDownloadDatasetVersionFileHandler);
   apiRouter.post("/files/uploads", authRequired, createUploadSessionHandler);
   apiRouter.post("/files/uploads/:uploadId/complete", authRequired, completeUploadSessionHandler);

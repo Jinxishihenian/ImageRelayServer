@@ -276,6 +276,81 @@ async function upgradeTasksTable(connection: mysql.Connection, databaseName: str
     alterClauses.push("ADD COLUMN `reviewed_at` DATETIME DEFAULT NULL AFTER `reviewed_by`");
   }
 
+  if (!existingColumns.has("cleaned_draft_file")) {
+    console.log("Missing column: tasks.cleaned_draft_file");
+    alterClauses.push("ADD COLUMN `cleaned_draft_file` VARCHAR(255) DEFAULT NULL AFTER `reviewed_at`");
+  }
+
+  if (!existingColumns.has("cleaned_draft_file_name")) {
+    console.log("Missing column: tasks.cleaned_draft_file_name");
+    alterClauses.push("ADD COLUMN `cleaned_draft_file_name` VARCHAR(255) DEFAULT NULL AFTER `cleaned_draft_file`");
+  }
+
+  if (!existingColumns.has("cleaner_draft_remark")) {
+    console.log("Missing column: tasks.cleaner_draft_remark");
+    alterClauses.push("ADD COLUMN `cleaner_draft_remark` TEXT DEFAULT NULL AFTER `cleaned_draft_file_name`");
+  }
+
+  if (!existingColumns.has("cleaned_draft_saved_at")) {
+    console.log("Missing column: tasks.cleaned_draft_saved_at");
+    alterClauses.push("ADD COLUMN `cleaned_draft_saved_at` DATETIME DEFAULT NULL AFTER `cleaner_draft_remark`");
+  }
+
+  if (!existingColumns.has("cleaned_draft_ready")) {
+    console.log("Missing column: tasks.cleaned_draft_ready");
+    alterClauses.push("ADD COLUMN `cleaned_draft_ready` TINYINT(1) NOT NULL DEFAULT 0 AFTER `cleaned_draft_saved_at`");
+  }
+
+  if (!existingColumns.has("annotated_draft_file")) {
+    console.log("Missing column: tasks.annotated_draft_file");
+    alterClauses.push("ADD COLUMN `annotated_draft_file` VARCHAR(255) DEFAULT NULL AFTER `cleaned_draft_ready`");
+  }
+
+  if (!existingColumns.has("annotated_draft_file_name")) {
+    console.log("Missing column: tasks.annotated_draft_file_name");
+    alterClauses.push("ADD COLUMN `annotated_draft_file_name` VARCHAR(255) DEFAULT NULL AFTER `annotated_draft_file`");
+  }
+
+  if (!existingColumns.has("annotator_draft_remark")) {
+    console.log("Missing column: tasks.annotator_draft_remark");
+    alterClauses.push("ADD COLUMN `annotator_draft_remark` TEXT DEFAULT NULL AFTER `annotated_draft_file_name`");
+  }
+
+  if (!existingColumns.has("annotated_draft_saved_at")) {
+    console.log("Missing column: tasks.annotated_draft_saved_at");
+    alterClauses.push("ADD COLUMN `annotated_draft_saved_at` DATETIME DEFAULT NULL AFTER `annotator_draft_remark`");
+  }
+
+  if (!existingColumns.has("annotated_draft_ready")) {
+    console.log("Missing column: tasks.annotated_draft_ready");
+    alterClauses.push("ADD COLUMN `annotated_draft_ready` TINYINT(1) NOT NULL DEFAULT 0 AFTER `annotated_draft_saved_at`");
+  }
+
+  if (!existingColumns.has("model_draft_file")) {
+    console.log("Missing column: tasks.model_draft_file");
+    alterClauses.push("ADD COLUMN `model_draft_file` VARCHAR(255) DEFAULT NULL AFTER `annotated_draft_ready`");
+  }
+
+  if (!existingColumns.has("model_draft_file_name")) {
+    console.log("Missing column: tasks.model_draft_file_name");
+    alterClauses.push("ADD COLUMN `model_draft_file_name` VARCHAR(255) DEFAULT NULL AFTER `model_draft_file`");
+  }
+
+  if (!existingColumns.has("trainer_draft_remark")) {
+    console.log("Missing column: tasks.trainer_draft_remark");
+    alterClauses.push("ADD COLUMN `trainer_draft_remark` TEXT DEFAULT NULL AFTER `model_draft_file_name`");
+  }
+
+  if (!existingColumns.has("model_draft_saved_at")) {
+    console.log("Missing column: tasks.model_draft_saved_at");
+    alterClauses.push("ADD COLUMN `model_draft_saved_at` DATETIME DEFAULT NULL AFTER `trainer_draft_remark`");
+  }
+
+  if (!existingColumns.has("model_draft_ready")) {
+    console.log("Missing column: tasks.model_draft_ready");
+    alterClauses.push("ADD COLUMN `model_draft_ready` TINYINT(1) NOT NULL DEFAULT 0 AFTER `model_draft_saved_at`");
+  }
+
   if (!existingColumns.has("model_iteration_id")) {
     console.log("Missing column: tasks.model_iteration_id");
     alterClauses.push("ADD COLUMN `model_iteration_id` INT UNSIGNED DEFAULT NULL AFTER `id`");

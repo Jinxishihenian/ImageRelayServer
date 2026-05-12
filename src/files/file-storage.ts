@@ -431,3 +431,10 @@ export async function ensureStoredFileExists(storageKey: string): Promise<string
 
   return absolutePath;
 }
+
+export async function getStoredFileSize(storageKey: string): Promise<number> {
+  const absolutePath = await ensureStoredFileExists(storageKey);
+  const stats = await fs.stat(absolutePath);
+
+  return stats.size;
+}
