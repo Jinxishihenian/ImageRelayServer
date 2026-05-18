@@ -10,6 +10,7 @@ import { AppError } from "../utils/app-error.js";
 export const ARCHIVE_EXTENSIONS = [".zip", ".rar", ".7z"] as const;
 export const ZIP_EXTENSION = ".zip";
 export const JSON_EXTENSION = ".json";
+export const TXT_EXTENSION = ".txt";
 
 const PREVIEWABLE_TASK_FILE_ALIASES = ["source", "cleaned"] as const satisfies readonly TaskFileAlias[];
 const IMAGE_MIME_TYPE_MAP: Record<string, string> = {
@@ -132,9 +133,27 @@ function getImageMimeType(fileName: string): string | null {
   return IMAGE_MIME_TYPE_MAP[extension] ?? null;
 }
 
+function getTextMimeType(fileName: string): string | null {
+  return getFileExtension(fileName) === TXT_EXTENSION ? "text/plain" : null;
+}
+
 function createInvalidArchiveContentError(fileLabel: string, entryName: string): AppError {
   return new AppError(
     `${fileLabel}压缩包中包含非图片文件：${entryName}。当前仅允许上传图片文件。`,
+    {
+      statusCode: 400,
+      code: "INVALID_ARCHIVE_CONTENT",
+    },
+  );
+}
+
+function createInvalidArchiveContentByAllowedTypeError(
+  fileLabel: string,
+  entryName: string,
+  allowedTypeLabel: string,
+): AppError {
+  return new AppError(
+    `${fileLabel}压缩包中包含不符合要求的文件：${entryName}。当前仅允许上传${allowedTypeLabel}。`,
     {
       statusCode: 400,
       code: "INVALID_ARCHIVE_CONTENT",
@@ -204,12 +223,14 @@ function decodeArchiveEntryId(entryId: string): DecodedArchiveEntryId {
 async function inspectZipEntries(
   zipFile: ZipFile,
   handlers: {
-    onImageEntry?: (payload: { entry: Entry; index: number; mimeType: string }) => void | Promise<void>;
+    onAcceptedEntry?: (payload: { entry: Entry; index: number; mimeType: string }) => void | Promise<void>;
   },
   fileLabel: string,
+  resolveMimeType: (fileName: string) => string | null,
+  allowedTypeLabel: string,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    let imageIndex = 0;
+    let acceptedEntryIndex = 0;
 
     const finishWithError = (error: unknown) => {
       zipFile.close();
@@ -228,16 +249,18 @@ async function inspectZipEntries(
         return;
       }
 
-      const mimeType = getImageMimeType(normalizedName);
+      const mimeType = resolveMimeType(normalizedName);
 
       if (!mimeType) {
-        finishWithError(createInvalidArchiveContentError(fileLabel, normalizedName));
+        finishWithError(
+          createInvalidArchiveContentByAllowedTypeError(fileLabel, normalizedName, allowedTypeLabel),
+        );
         return;
       }
 
-      Promise.resolve(handlers.onImageEntry?.({ entry, index: imageIndex, mimeType }))
+      Promise.resolve(handlers.onAcceptedEntry?.({ entry, index: acceptedEntryIndex, mimeType }))
         .then(() => {
-          imageIndex += 1;
+          acceptedEntryIndex += 1;
           zipFile.readEntry();
         })
         .catch((error) => {
@@ -571,21 +594,36 @@ export async function validateUploadContent(
   if ((purpose === "task_source" || purpose === "task_annotated") && getFileExtension(originalName) === ZIP_EXTENSION) {
     const zipFile = typeof source === "string" ? await openZipFromFile(source, false) : await openZipFromBuffer(source);
     let imageCount = 0;
+    const resolveMimeType = purpose === "task_source" ? getImageMimeType : getTextMimeType;
+    const allowedTypeLabel = purpose === "task_source" ? "图片文件" : ".txt 文件";
 
     try {
-      await inspectZipEntries(zipFile, {
-        onImageEntry: () => {
-          imageCount += 1;
+      await inspectZipEntries(
+        zipFile,
+        {
+          onAcceptedEntry: () => {
+            imageCount += 1;
+          },
         },
-      }, fileLabel);
+        fileLabel,
+        resolveMimeType,
+        allowedTypeLabel,
+      );
     } finally {
       zipFile.close();
     }
 
-    if (imageCount === 0) {
+    if (imageCount === 0 && purpose === "task_source") {
       throw new AppError(`${fileLabel}压缩包中未找到可用图片文件。`, {
         statusCode: 400,
         code: "EMPTY_ARCHIVE_IMAGES",
+      });
+    }
+
+    if (imageCount === 0 && purpose === "task_annotated") {
+      throw new AppError(`${fileLabel}压缩包中未找到可用的 .txt 文件。`, {
+        statusCode: 400,
+        code: "EMPTY_ARCHIVE_TEXTS",
       });
     }
   }
@@ -601,7 +639,7 @@ export async function listZipPreviewItems(filePath: string, fileLabel: string): 
   const items: ArchivePreviewItem[] = [];
 
   await inspectZipEntries(zipFile, {
-    onImageEntry: ({ entry, index, mimeType }) => {
+    onAcceptedEntry: ({ entry, index, mimeType }) => {
       const normalizedName = getNormalizedArchiveEntryName(entry);
       items.push({
         id: buildArchiveEntryId(index, normalizedName),
@@ -610,7 +648,7 @@ export async function listZipPreviewItems(filePath: string, fileLabel: string): 
         size: entry.uncompressedSize,
       });
     },
-  }, fileLabel);
+  }, fileLabel, getImageMimeType, "图片文件");
 
   if (items.length === 0) {
     throw new AppError(`${fileLabel}压缩包中未找到可预览的图片文件。`, {
@@ -730,7 +768,7 @@ export async function streamSelectedEntriesAsZip(input: {
 
   try {
     await inspectZipEntries(zipFile, {
-      onImageEntry: async ({ entry }) => {
+      onAcceptedEntry: async ({ entry }) => {
         const normalizedName = getNormalizedArchiveEntryName(entry);
 
         if (!selectedSet.has(normalizedName)) {
@@ -775,7 +813,7 @@ export async function streamSelectedEntriesAsZip(input: {
           lastModDate,
         });
       },
-    }, input.sourceArchiveLabel);
+    }, input.sourceArchiveLabel, getImageMimeType, "图片文件");
 
     const centralDirectoryOffset = bytesWritten;
 
