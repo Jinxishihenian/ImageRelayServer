@@ -1,6 +1,5 @@
 node_modules/
 dist/
-.env
 coverage/
 .pnpm-store
 .codex

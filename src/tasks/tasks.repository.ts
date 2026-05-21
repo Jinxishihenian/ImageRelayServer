@@ -11,7 +11,7 @@ import type {
   UserRole,
 } from "../types/domain.js";
 import { toIsoString } from "../common/date.js";
-import { buildTaskVisibilitySql } from "./task-visibility.js";
+import { buildTaskActionPrioritySql, buildTaskVisibilitySql } from "./task-visibility.js";
 
 export type TaskRow = {
   id: number;
@@ -599,6 +599,7 @@ export async function listTasksForUser(
     status: input.status,
     reviewStatus: input.reviewStatus,
   });
+  const taskPriority = buildTaskActionPrioritySql(scope, "t");
   const actionableSummary = getActionableSummarySql(scope);
   const summaryRows = await query<TaskSummaryRow[]>(
     `
@@ -625,12 +626,13 @@ export async function listTasksForUser(
       ${getBaseTaskSelectSql()}
       ${listFilter.whereClause}
       ORDER BY
+        ${taskPriority.expression} ASC,
         t.created_at DESC,
         -- 创建时间可能精确到秒，使用主键倒序兜底，保证分页顺序稳定。
         t.id DESC
       LIMIT ? OFFSET ?
     `,
-    [...listFilter.params, input.pageSize, offset],
+    [...taskPriority.params, ...listFilter.params, input.pageSize, offset],
   );
 
   return {

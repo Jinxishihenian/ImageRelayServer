@@ -26,6 +26,11 @@ type TaskVisibilitySql = {
   params: number[];
 };
 
+type TaskPrioritySql = {
+  expression: string;
+  params: number[];
+};
+
 function buildRoleVisibilitySql(
   userId: number,
   assigneeColumn: string,
@@ -81,6 +86,35 @@ export function buildTaskVisibilitySql(
         "pending_train",
         `${tableAlias}.model_file`,
       );
+  }
+}
+
+export function buildTaskActionPrioritySql(
+  scope: TaskVisibilityScope,
+  tableAlias = "t",
+): TaskPrioritySql {
+  // 把“当前就需要处理”的任务排到前面，分页时也能优先看到待办，而不是先看到已处理过的记录。
+  switch (scope.role) {
+    case "admin":
+      return {
+        expression: `CASE WHEN ${tableAlias}.review_status = 'pending_admin_review' THEN 0 ELSE 1 END`,
+        params: [],
+      };
+    case "cleaner":
+      return {
+        expression: `CASE WHEN ${tableAlias}.cleaner_id = ? AND ((${tableAlias}.status = 'pending_clean' AND ${tableAlias}.review_status <> 'pending_admin_review') OR ${tableAlias}.review_status = 'rejected') THEN 0 ELSE 1 END`,
+        params: [scope.id],
+      };
+    case "annotator":
+      return {
+        expression: `CASE WHEN ${tableAlias}.annotator_id = ? AND ((${tableAlias}.status = 'pending_annotate' AND ${tableAlias}.review_status <> 'pending_admin_review') OR ${tableAlias}.review_status = 'rejected') THEN 0 ELSE 1 END`,
+        params: [scope.id],
+      };
+    case "trainer":
+      return {
+        expression: `CASE WHEN ${tableAlias}.trainer_id = ? AND ((${tableAlias}.status = 'pending_train' AND ${tableAlias}.review_status <> 'pending_admin_review') OR ${tableAlias}.review_status = 'rejected') THEN 0 ELSE 1 END`,
+        params: [scope.id],
+      };
   }
 }
 

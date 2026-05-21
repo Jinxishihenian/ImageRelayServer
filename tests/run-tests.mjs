@@ -22,6 +22,7 @@ import {
 import {
   buildTaskVisibilitySql,
   canUserAccessTask,
+  buildTaskActionPrioritySql,
 } from "../dist/tasks/task-visibility.js";
 
 const baseEnv = {
@@ -52,6 +53,15 @@ async function run() {
   assert.deepEqual(buildTaskVisibilitySql({ id: 1, role: "admin" }, "t"), {
     condition: "",
     params: [],
+  });
+  assert.deepEqual(buildTaskActionPrioritySql({ id: 1, role: "admin" }, "t"), {
+    expression: "CASE WHEN t.review_status = 'pending_admin_review' THEN 0 ELSE 1 END",
+    params: [],
+  });
+  assert.deepEqual(buildTaskActionPrioritySql({ id: 2, role: "cleaner" }, "t"), {
+    expression:
+      "CASE WHEN t.cleaner_id = ? AND ((t.status = 'pending_clean' AND t.review_status <> 'pending_admin_review') OR t.review_status = 'rejected') THEN 0 ELSE 1 END",
+    params: [2],
   });
   assert.deepEqual(buildTaskVisibilitySql({ id: 2, role: "cleaner" }, "t"), {
     condition: `(
