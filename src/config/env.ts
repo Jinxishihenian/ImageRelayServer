@@ -12,7 +12,8 @@ const DEFAULT_DB_USER = "root";
 const DEFAULT_DB_NAME = "wss_image_relay";
 const DEFAULT_AUTH_TOKEN_SECRET = "image-relay-dev-secret";
 const DEFAULT_DOWNLOAD_LINK_SECRET = "image-relay-download-link-secret";
-const DEFAULT_MAX_UPLOAD_SIZE_MB = 50;
+// 上传接口按 MiB 读取环境变量，这里改成 10 GiB，避免生产环境未显式配置时仍落回 50 MiB。
+const DEFAULT_MAX_UPLOAD_SIZE_MB = 10 * 1024;
 const VALID_NODE_ENVS = new Set(["development", "test", "production"]);
 const DOWNLOAD_LINK_TTL_MS = 60 * 60 * 1000;
 
